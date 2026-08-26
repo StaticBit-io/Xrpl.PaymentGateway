@@ -57,16 +57,23 @@ public sealed class MyOrderActivator : IPaymentReceivedHandler
   must be idempotent.
 - **No gaps across disconnects.** A persisted ledger cursor marks the boundary below which completeness is
   proven. Every reconnect subscribes first, then replays `account_tx` from the cursor. If no node can prove
-  a range, the cursor freezes rather than skipping it.
+  a range, the cursor freezes rather than skipping it. A stream that skips ledger numbers, or a client whose
+  inbound queue overflowed, ends the session rather than advancing the cursor across what it did not see.
 - **Amounts as delivered.** Values come from transaction metadata balance changes, not the `Amount` field,
   so a partial payment is recorded at what actually arrived.
 
 ## What it expects of the receiving account
 
 Use a dedicated account that only receives. Specifically, it must not have `DefaultRipple` enabled and
-should not hold DEX offers or AMM positions. A transaction that both credits and debits the account is
-treated as an exchange rather than a payment: it is refused, logged as an error, and counted in the health
-report rather than credited to a buyer.
+should not hold DEX offers or AMM positions.
+
+A transaction that both credits and debits the account is treated as an exchange rather than a payment: it
+is **not recorded**, is logged as an error, and increments `AnomalyCount` in the health report. This is a
+deliberate trade. Recording it would risk crediting a buyer for value the account did not net-receive, and
+that releases goods; refusing it leaves funds visible on the ledger with no record, which a human can
+reconcile. Reconciliation will not recover such a transaction either — it is the same decision every time —
+so treat any rise in `AnomalyCount` as something to investigate rather than a statistic. If you see one,
+the usual cause is that the receiving account has an offer or a rippling trust line it should not have.
 
 ## Health and reconciliation
 
@@ -80,6 +87,11 @@ ReconciliationResult result = await health.ReconcileAsync(cancellationToken);   
 `ReconcileAsync` redelivers anything the handler never accepted and re-verifies a window of ledgers below
 the cursor. A non-zero `RecoveredCount` means a payment was missing from the store: investigate, because
 the monitor should never let that happen.
+
+**Schedule it more often than its own window.** `ReconcileWindow` defaults to 2000 ledgers, roughly two
+hours; running reconciliation less often than that leaves ledgers no sweep ever covers. `RedeliveredCount`
+counts only records that actually reached the handler — a handler that keeps failing shows up in `Errors`,
+not as progress.
 
 ## Operational notes
 

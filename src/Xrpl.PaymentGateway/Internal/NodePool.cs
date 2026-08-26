@@ -27,7 +27,4 @@ internal sealed class NodePool
         _index = (_index + 1) % _nodes.Count;
         return _nodes[_index];
     }
-
-    /// <summary>The node <see cref="Next"/> would return, without advancing.</summary>
-    public Uri Peek() => _nodes[(_index + 1) % _nodes.Count];
 }

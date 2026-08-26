@@ -38,6 +38,8 @@ internal sealed class XrplNodeConnection : IXrplNodeConnection
 
     public Uri Node { get; }
 
+    public long DroppedStreamMessages => _client.DroppedStreamMessages;
+
     public Func<IAccountTransaction, Task>? OnTransaction { get; set; }
 
     public Func<ulong, Task>? OnLedgerClosed { get; set; }

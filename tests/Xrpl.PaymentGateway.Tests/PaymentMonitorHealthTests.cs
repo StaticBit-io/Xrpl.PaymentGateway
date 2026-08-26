@@ -15,6 +15,7 @@ public class PaymentMonitorHealthTests
     {
         public Harness(Action<PaymentGatewayOptions>? configure = null)
         {
+            Scripted = new ScriptedPaymentStore(Store);
             Options = new PaymentGatewayOptions
             {
                 Address = TransactionFixtures.Receiver,
@@ -25,7 +26,7 @@ public class PaymentMonitorHealthTests
 
             Health = new PaymentMonitorHealth(
                 Microsoft.Extensions.Options.Options.Create(Options),
-                Store,
+                Scripted,
                 Handler,
                 Snapshot,
                 Factory,
@@ -36,6 +37,8 @@ public class PaymentMonitorHealthTests
         public PaymentGatewayOptions Options { get; }
 
         public InMemoryPaymentStore Store { get; } = new InMemoryPaymentStore();
+
+        public ScriptedPaymentStore Scripted { get; }
 
         public RecordingHandler Handler { get; } = new RecordingHandler();
 
@@ -162,6 +165,57 @@ public class PaymentMonitorHealthTests
         Assert.Equal(0, result.RecoveredCount);
         Assert.Empty(result.Errors);
         Assert.False(result.Skipped);
+    }
+
+    [Fact]
+    public async Task AStoreThatCannotBeReadIsNeverReportedHealthy()
+    {
+        Harness harness = new Harness();
+        harness.Snapshot.SetState(PaymentMonitorState.Streaming);
+        harness.Snapshot.SetCursor(1000);
+        harness.Snapshot.SetValidatedLedger(1000, DateTimeOffset.UnixEpoch);
+        harness.Scripted.UnhandledReadFailure = new TimeoutException("store is down");
+
+        PaymentMonitorHealthReport report = await harness.Health.CheckAsync(TestContext.Current.CancellationToken);
+
+        // The unhandled count defaults to zero when the read fails; that must not read as "nothing pending".
+        Assert.False(report.IsHealthy);
+        Assert.Contains("store is down", report.LastError);
+    }
+
+    [Fact]
+    public async Task APaymentTheHandlerKeepsRejectingIsNotCountedAsRedelivered()
+    {
+        Harness harness = new Harness();
+        harness.Snapshot.SetCursor(0);
+        harness.Handler.Throws = true;
+        await harness.Store.TryAddPaymentAsync(Record("A"), TestContext.Current.CancellationToken);
+
+        ReconciliationResult result = await harness.Health.ReconcileAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.RedeliveredCount);
+        Assert.NotEmpty(result.Errors);
+        Assert.Single(await harness.Store.GetUnhandledPaymentsAsync(10, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task ASecondReconciliationWhileOneIsRunningReportsItselfSkipped()
+    {
+        Harness harness = new Harness();
+        harness.Snapshot.SetCursor(0);
+        TaskCompletionSource gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Scripted.HoldUnhandledReads = gate;
+
+        Task<ReconciliationResult> first = harness.Health.ReconcileAsync(TestContext.Current.CancellationToken);
+        await TestWait.UntilAsync(() => !first.IsCompleted, "the first run to be in flight");
+
+        ReconciliationResult second = await harness.Health.ReconcileAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(second.Skipped);
+        Assert.Equal(0, second.RedeliveredCount);
+
+        gate.SetResult();
+        await first;
     }
 
     [Fact]

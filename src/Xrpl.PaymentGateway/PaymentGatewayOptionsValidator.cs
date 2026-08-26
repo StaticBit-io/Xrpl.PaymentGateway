@@ -18,14 +18,13 @@ public sealed class PaymentGatewayOptionsValidator : IValidateOptions<PaymentGat
         {
             failures.Add($"{nameof(options.Nodes)} must contain at least one node.");
         }
-        else
+
+        // Checked outside the else so that a bad CatchUpNodes entry is still reported when Nodes is empty.
+        foreach (Uri node in (options.Nodes ?? Array.Empty<Uri>()).Concat(options.CatchUpNodes ?? Array.Empty<Uri>()))
         {
-            foreach (Uri node in options.Nodes.Concat(options.CatchUpNodes ?? Array.Empty<Uri>()))
+            if (node.Scheme is not ("ws" or "wss"))
             {
-                if (node.Scheme is not ("ws" or "wss"))
-                {
-                    failures.Add($"node {node} must use the ws or wss scheme.");
-                }
+                failures.Add($"node {node} must use the ws or wss scheme.");
             }
         }
 
@@ -34,9 +33,29 @@ public sealed class PaymentGatewayOptionsValidator : IValidateOptions<PaymentGat
             failures.Add($"{nameof(options.FirstDestinationTag)} must be greater than zero; tag 0 reads as \"no tag\" in many wallets.");
         }
 
-        if (options.LedgerStallTimeout <= TimeSpan.Zero)
+        RequirePositive(options.LedgerStallTimeout, nameof(options.LedgerStallTimeout));
+        RequirePositive(options.NetworkStallProbeInterval, nameof(options.NetworkStallProbeInterval));
+        RequirePositive(options.ReconnectBaseDelay, nameof(options.ReconnectBaseDelay));
+        RequirePositive(options.ReconnectMaxDelay, nameof(options.ReconnectMaxDelay));
+        RequirePositive(options.StoreRetryBaseDelay, nameof(options.StoreRetryBaseDelay));
+        RequirePositive(options.StoreRetryMaxDelay, nameof(options.StoreRetryMaxDelay));
+
+        if (options.ReconnectBaseDelay > options.ReconnectMaxDelay)
         {
-            failures.Add($"{nameof(options.LedgerStallTimeout)} must be positive.");
+            failures.Add($"{nameof(options.ReconnectBaseDelay)} must not exceed {nameof(options.ReconnectMaxDelay)}.");
+        }
+
+        if (options.StoreRetryBaseDelay > options.StoreRetryMaxDelay)
+        {
+            failures.Add($"{nameof(options.StoreRetryBaseDelay)} must not exceed {nameof(options.StoreRetryMaxDelay)}.");
+        }
+
+        void RequirePositive(TimeSpan value, string name)
+        {
+            if (value <= TimeSpan.Zero)
+            {
+                failures.Add($"{name} must be positive.");
+            }
         }
 
         if (options.StreamBufferCapacity <= 0)

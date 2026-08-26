@@ -207,12 +207,14 @@ public class XrplPaymentMonitorTests
         await TestWait.UntilAsync(
             () => harness.Snapshot.Read().State == PaymentMonitorState.Streaming, "the monitor to start streaming");
 
-        await node.PushLedgerAsync(120);
+        // One ledger past the starting point. The margin of one covers the fact that rippled does not
+        // guarantee every transaction of ledger N arrives before N's close notification.
+        await node.PushLedgerAsync(91);
 
         await TestWait.UntilAsync(
-            () => harness.Snapshot.Read().Cursor == 119u,
-            "the cursor to reach 119");
-        Assert.Equal(119u, await harness.Store.GetLastProcessedLedgerAsync(TestContext.Current.CancellationToken));
+            () => harness.Snapshot.Read().Cursor == 90u,
+            "the cursor to reach 90");
+        Assert.Equal(90u, await harness.Store.GetLastProcessedLedgerAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]

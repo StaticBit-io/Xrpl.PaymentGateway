@@ -51,6 +51,7 @@ internal sealed class PaymentMonitorHealth : IPaymentMonitorHealth
         MonitorSnapshotData data = _snapshot.Read();
         string? lastError = data.LastError;
         int unhandled = 0;
+        bool storeUnreadable = false;
 
         try
         {
@@ -61,6 +62,9 @@ internal sealed class PaymentMonitorHealth : IPaymentMonitorHealth
         }
         catch (Exception ex)
         {
+            // A health endpoint that could not reach the store must not answer "healthy" just because the
+            // count it failed to read defaulted to zero.
+            storeUnreadable = true;
             lastError = ex.Message;
             _logger.LogError(ex, "reading unhandled payments for the health report failed");
         }
@@ -81,6 +85,7 @@ internal sealed class PaymentMonitorHealth : IPaymentMonitorHealth
             LastError = lastError,
             LastLedgerAt = data.LastLedgerAt,
             IsHealthy = data.State == PaymentMonitorState.Streaming
+                && !storeUnreadable
                 && lag <= _options.MaxAcceptableLedgerLag
                 && unhandled == 0,
         };
@@ -139,15 +144,28 @@ internal sealed class PaymentMonitorHealth : IPaymentMonitorHealth
         }
 
         int delivered = 0;
+        int failed = 0;
         foreach (PaymentRecord record in pending)
         {
-            await _dispatcher.DeliverAsync(record, cancellationToken).ConfigureAwait(false);
-            delivered++;
+            if (await _dispatcher.DeliverAsync(record, cancellationToken).ConfigureAwait(false))
+            {
+                delivered++;
+            }
+            else
+            {
+                failed++;
+            }
         }
 
         if (delivered > 0)
         {
             _logger.LogWarning("reconciliation redelivered {Count} payments the handler had not accepted", delivered);
+        }
+
+        if (failed > 0)
+        {
+            // Counting attempts as successes would let a permanently broken handler report progress forever.
+            errors.Add($"{failed} payments could not be delivered to the handler and remain unhandled");
         }
 
         return delivered;

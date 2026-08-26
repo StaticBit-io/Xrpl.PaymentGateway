@@ -16,6 +16,8 @@ internal sealed class FakeXrplNodeConnection : IXrplNodeConnection
 
     public Uri Node { get; }
 
+    public long DroppedStreamMessages { get; set; }
+
     public Func<IAccountTransaction, Task>? OnTransaction { get; set; }
 
     public Func<ulong, Task>? OnLedgerClosed { get; set; }

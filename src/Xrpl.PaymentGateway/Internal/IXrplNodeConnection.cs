@@ -10,6 +10,12 @@ internal interface IXrplNodeConnection : IAsyncDisposable
 {
     Uri Node { get; }
 
+    /// <summary>
+    /// How many stream frames the client discarded because its inbound queue overflowed. The SDK's queue
+    /// is bounded and drops the oldest frame, so a rise here means transactions were lost without an error.
+    /// </summary>
+    long DroppedStreamMessages { get; }
+
     /// <summary>Raised for every transaction affecting the subscribed account.</summary>
     Func<IAccountTransaction, Task>? OnTransaction { get; set; }
 

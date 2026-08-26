@@ -91,10 +91,12 @@ internal sealed class XrplPaymentMonitor : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            DateTimeOffset sessionStarted = _timeProvider.GetUtcNow();
+
             try
             {
                 await RunSessionAsync(stoppingToken).ConfigureAwait(false);
-                attempt = 0;
+                attempt = WasSessionProductive(sessionStarted) ? 0 : attempt + 1;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -103,7 +105,10 @@ internal sealed class XrplPaymentMonitor : BackgroundService
             catch (SessionEndedException ex)
             {
                 _logger.LogWarning("node session ended: {Reason}", ex.Message);
-                attempt = 0;
+
+                // Only a session that actually ran resets the backoff. A node that accepts the socket and
+                // drops it immediately would otherwise be retried forever at the base delay.
+                attempt = WasSessionProductive(sessionStarted) ? 0 : attempt + 1;
             }
             catch (Exception ex)
             {
@@ -209,6 +214,19 @@ internal sealed class XrplPaymentMonitor : BackgroundService
         _snapshot.SetValidatedLedger(validated, _timeProvider.GetUtcNow());
 
         uint cursor = storedCursor ?? _options.StartLedgerIndex ?? validated;
+
+        if (storedCursor is null && cursor > validated)
+        {
+            // A StartLedgerIndex above the network's own tip would park the cursor in the future: every
+            // later write would be discarded as "already past this", the lag would read as zero, and a
+            // restart would never replay the ledgers in between.
+            _logger.LogWarning(
+                "StartLedgerIndex {Start} is beyond the validated ledger {Validated}; starting from the validated ledger instead",
+                cursor,
+                validated);
+            cursor = validated;
+        }
+
         _persistedCursor = cursor;
         _snapshot.SetCursor(cursor);
 
@@ -318,7 +336,12 @@ internal sealed class XrplPaymentMonitor : BackgroundService
         CancellationToken cancellationToken)
     {
         DateTimeOffset lastProgress = _timeProvider.GetUtcNow();
-        uint lastSeenValidated = validatedAtStart;
+
+        // Contiguity baseline. The cursor can sit above the node's validated ledger when the previous
+        // session ran against a node that was further ahead, and ledgers at or below the cursor are
+        // already proven, so the baseline is whichever is higher.
+        uint lastSeenValidated = Math.Max(validatedAtStart, _persistedCursor);
+        long droppedAtStart = connection.DroppedStreamMessages;
         Task<bool>? wait = null;
 
         while (!cancellationToken.IsCancellationRequested)
@@ -331,9 +354,12 @@ internal sealed class XrplPaymentMonitor : BackgroundService
                 ? _options.NetworkStallProbeInterval
                 : _options.LedgerStallTimeout;
 
-            Task completed = await Task.WhenAny(
-                wait,
-                Task.Delay(idleBudget, _timeProvider, cancellationToken)).ConfigureAwait(false);
+            // The timer gets its own token so that a wait won by the channel releases it immediately.
+            // Leaving each timer to expire on its own would pile them up for the life of the session.
+            using CancellationTokenSource delayCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            Task delay = Task.Delay(idleBudget, _timeProvider, delayCts.Token);
+            Task completed = await Task.WhenAny(wait, delay).ConfigureAwait(false);
+            await delayCts.CancelAsync().ConfigureAwait(false);
 
             if (completed != wait)
             {
@@ -383,19 +409,53 @@ internal sealed class XrplPaymentMonitor : BackgroundService
                 }
 
                 uint closed = (uint)monitorEvent.LedgerIndex;
-                lastSeenValidated = closed;
                 lastProgress = _timeProvider.GetUtcNow();
                 _snapshot.SetValidatedLedger(closed, lastProgress);
+
+                if (closed <= lastSeenValidated)
+                {
+                    // A ledger at or below the baseline: either a frame queued before the catch-up window
+                    // closed, or a node still replaying its own backlog. Nothing new is proven by it.
+                    continue;
+                }
+
+                if (closed > lastSeenValidated + 1)
+                {
+                    // The stream skipped ledgers, so it no longer proves what happened in between — a node
+                    // catching up in bulk, or frames the SDK dropped from its bounded queue. Advancing the
+                    // cursor here would declare unsearched ledgers complete, so end the session instead and
+                    // let the next one replay the gap through a verified catch-up.
+                    _logger.LogWarning(
+                        "ledger stream jumped from {Previous} to {Closed} on {Node}; ending the session so catch-up can prove the gap",
+                        lastSeenValidated,
+                        closed,
+                        connection.Node);
+                    return;
+                }
+
+                lastSeenValidated = closed;
 
                 if (_unprovenFromLedger is not null)
                 {
                     // An unproven range is still open behind us. Keep recording live payments, but neither
                     // advance the cursor nor let the state read as healthy.
+                    _snapshot.SetState(PaymentMonitorState.HistoryGap);
                     continue;
                 }
 
                 _snapshot.SetState(PaymentMonitorState.Streaming);
                 await PersistCursorAsync(closed - 1, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (connection.DroppedStreamMessages > droppedAtStart)
+            {
+                // The client's inbound queue overflowed and discarded the oldest frames, which may have
+                // included transactions. Nothing reports that as an error, so treat it as one.
+                _logger.LogError(
+                    "{Count} stream frames were dropped on {Node}; ending the session so catch-up can recollect them from the ledger",
+                    connection.DroppedStreamMessages - droppedAtStart,
+                    connection.Node);
+                return;
             }
         }
     }
@@ -507,6 +567,10 @@ internal sealed class XrplPaymentMonitor : BackgroundService
         _persistedCursor = cursor;
         _snapshot.SetCursor(cursor);
     }
+
+    /// <summary>A session that lived long enough to be doing its job, rather than failing on arrival.</summary>
+    private bool WasSessionProductive(DateTimeOffset startedAt) =>
+        _timeProvider.GetUtcNow() - startedAt >= _options.ProductiveSessionThreshold;
 
     private TimeSpan ReconnectDelay(int attempt)
     {

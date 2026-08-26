@@ -240,6 +240,25 @@ from the channel. The one-ledger margin covers the fact that rippled does not
 hard-guarantee "all transactions of a ledger before its ledgerClosed" message
 ordering; the cost on restart is a couple of idempotent replays.
 
+**Contiguity is part of the proof.** "Uninterrupted stream" means the ledger
+numbers arrive without gaps. Two things break that in practice: a node catching
+up applies ledgers in bulk and announces only the latest, and the SDK's inbound
+stream queue is bounded with a drop-oldest policy, so frames — transactions
+included — can be discarded silently under load. Hence two guards:
+
+- `ledgerClosed(N)` with `N > lastSeen + 1` does not advance the cursor. The
+  session ends instead, and the next one replays the span through a verified
+  catch-up. `N ≤ lastSeen` is ignored: it is a queued frame that proves nothing
+  new, and treating it as the stream running backwards would cause a reconnect
+  loop. The baseline for `lastSeen` at session start is `max(validated, cursor)`,
+  because a node can sit behind a cursor another node already proved.
+- A rise in the client's dropped-frame counter ends the session for the same
+  reason.
+
+`StartLedgerIndex` above the current validated ledger is clamped down to it: a
+cursor parked in the future would discard every later write as "already past
+this" and report zero lag while proving nothing.
+
 ## Failure handling
 
 - **WS drop / subscribe failure / node desync** — reconnect with exponential

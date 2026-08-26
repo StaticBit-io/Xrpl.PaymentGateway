@@ -25,8 +25,11 @@ internal sealed class PaymentDispatcher
     public Task<bool> RecordAsync(PaymentRecord record, CancellationToken cancellationToken) =>
         _store.TryAddPaymentAsync(record, cancellationToken);
 
-    /// <summary>Resolves the buyer, hands the payment to the host, and marks it handled on success.</summary>
-    public async Task DeliverAsync(PaymentRecord record, CancellationToken cancellationToken)
+    /// <summary>
+    /// Resolves the buyer, hands the payment to the host, and marks it handled on success.
+    /// Returns true only when the record actually reached the handler and was marked handled.
+    /// </summary>
+    public async Task<bool> DeliverAsync(PaymentRecord record, CancellationToken cancellationToken)
     {
         string? buyerId = null;
 
@@ -47,6 +50,8 @@ internal sealed class PaymentDispatcher
                 record.Currency,
                 record.Sender,
                 buyerId ?? "unknown");
+
+            return true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -58,6 +63,8 @@ internal sealed class PaymentDispatcher
                 ex,
                 "delivering payment {Hash} failed; it stays unhandled and reconciliation will retry it",
                 record.TransactionHash);
+
+            return false;
         }
     }
 }

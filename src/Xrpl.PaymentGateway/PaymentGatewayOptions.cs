@@ -37,6 +37,12 @@ public sealed class PaymentGatewayOptions
     /// <summary>Ceiling on the reconnect delay.</summary>
     public TimeSpan ReconnectMaxDelay { get; set; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// How long a session must last to count as productive and reset the reconnect backoff. Without it,
+    /// a node that accepts the socket and drops it immediately would be retried forever at the base delay.
+    /// </summary>
+    public TimeSpan ProductiveSessionThreshold { get; set; } = TimeSpan.FromSeconds(30);
+
     /// <summary>First store retry delay.</summary>
     public TimeSpan StoreRetryBaseDelay { get; set; } = TimeSpan.FromSeconds(1);
 

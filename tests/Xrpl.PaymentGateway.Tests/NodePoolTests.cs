@@ -21,23 +21,21 @@ public class NodePoolTests
     }
 
     [Fact]
-    public void PeekShowsTheNodeNextWouldReturnWithoutConsumingIt()
+    public void ASingleNodePoolKeepsReturningTheOneNode()
     {
-        NodePool pool = new NodePool(new[] { NodeA, NodeB });
-        pool.Next();
+        NodePool pool = new NodePool(new[] { NodeA });
 
-        Assert.Equal(NodeB, pool.Peek());
-        Assert.Equal(NodeB, pool.Next());
+        Assert.Equal(NodeA, pool.Next());
+        Assert.Equal(NodeA, pool.Next());
+        Assert.Equal(1, pool.Count);
     }
 
     [Fact]
-    public void ASingleNodePoolPeeksAtItself()
+    public void NodesExposesThePoolForFanOutProbes()
     {
-        NodePool pool = new NodePool(new[] { NodeA });
-        pool.Next();
+        NodePool pool = new NodePool(new[] { NodeA, NodeB, NodeC });
 
-        Assert.Equal(NodeA, pool.Peek());
-        Assert.Equal(1, pool.Count);
+        Assert.Equal(new[] { NodeA, NodeB, NodeC }, pool.Nodes);
     }
 
     [Fact]
