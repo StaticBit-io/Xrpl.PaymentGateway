@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
+    <PackageId>Xrpl.PaymentGateway.Abstractions</PackageId>
+    <Description>Models and interfaces for accepting XRP Ledger payments. Storage-agnostic: no dependency on the XRPL SDK.</Description>
+  </PropertyGroup>
+</Project>

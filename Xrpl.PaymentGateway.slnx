@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Xrpl.PaymentGateway.Abstractions/Xrpl.PaymentGateway.Abstractions.csproj" />
+    <Project Path="src/Xrpl.PaymentGateway/Xrpl.PaymentGateway.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Xrpl.PaymentGateway.Tests/Xrpl.PaymentGateway.Tests.csproj" />
+  </Folder>
+</Solution>
