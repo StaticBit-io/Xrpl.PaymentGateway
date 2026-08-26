@@ -85,16 +85,21 @@ Decisions behind the model:
 - **Sender filter.** Transactions where `tx.Account` equals the receiving
   address are never recorded — they are the account's own actions, not incoming
   payments.
-- **Any crediting transaction counts.** Not only `Payment`: anything validated
-  that produced a positive balance change for the receiving address
-  (`CheckCash`, `EscrowFinish`, ...) is recorded, hence `TransactionType` in
-  the record. Buyer payments arrive as `Payment` with a tag; everything else is
-  recorded with `DestinationTag = null` and simply is not linked to a buyer.
-- **Defensive anomaly path.** If the processor ever computes more than one
-  positive asset delta for a single transaction, it records the largest one,
-  logs an error with the full transaction, and increments an anomaly counter
-  exposed by the health report. No silent loss, no data-model complexity for a
-  phantom case.
+- **Only `Payment` addressed to us counts.** A transaction qualifies only when it
+  is a `Payment` whose `Destination` is the receiving address. Other transactions
+  can move the account's balances without being a buyer paying us — an offer of
+  ours crossed on the DEX is trade proceeds, a payment rippling through us to a
+  third party is money in transit — and neither carries a destination tag that
+  means anything to us. `CheckCash`, `EscrowFinish` and `PaymentChannelClaim` are
+  real ways funds arrive but cannot be attributed to a buyer by tag, so they are
+  out of scope and the host reconciles them itself.
+- **Defensive anomaly path.** Two shapes are impossible for an account that only
+  receives: a payment to us that also debits us, and a payment crediting two
+  assets at once. Both indicate the account holds an offer or a rippling trust
+  line it should not. In both cases the largest credit **is recorded** — the
+  filter above has already established this is a payment addressed to us, so the
+  money is a buyer's and dropping it would lose a real payment — and an error is
+  logged with an anomaly counter raised in the health report.
 
 ## Storage abstraction
 

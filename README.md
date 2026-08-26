@@ -62,18 +62,27 @@ public sealed class MyOrderActivator : IPaymentReceivedHandler
 - **Amounts as delivered.** Values come from transaction metadata balance changes, not the `Amount` field,
   so a partial payment is recorded at what actually arrived.
 
+## What counts as a payment
+
+Exactly one thing: a validated, successful **`Payment` whose `Destination` is the receiving account**, sent
+by somebody else. Nothing else is recorded, even when it moves the account's balances — an offer of yours
+being crossed on the DEX is trade proceeds, and a payment rippling through you to a third party is money in
+transit. Neither is a buyer paying you, and neither carries a destination tag that means anything to you.
+
+Other ways funds can reach an account — `CheckCash`, `EscrowFinish`, `PaymentChannelClaim` — are outside
+this library's scope. They cannot be attributed to a buyer by destination tag, so if you accept them you
+need to reconcile them yourself.
+
 ## What it expects of the receiving account
 
 Use a dedicated account that only receives. Specifically, it must not have `DefaultRipple` enabled and
 should not hold DEX offers or AMM positions.
 
-A transaction that both credits and debits the account is treated as an exchange rather than a payment: it
-is **not recorded**, is logged as an error, and increments `AnomalyCount` in the health report. This is a
-deliberate trade. Recording it would risk crediting a buyer for value the account did not net-receive, and
-that releases goods; refusing it leaves funds visible on the ledger with no record, which a human can
-reconcile. Reconciliation will not recover such a transaction either — it is the same decision every time —
-so treat any rise in `AnomalyCount` as something to investigate rather than a statistic. If you see one,
-the usual cause is that the receiving account has an offer or a rippling trust line it should not have.
+If a payment addressed to you *also* debits the account, or credits two assets at once, the record is
+still written — it is a buyer's money and dropping it would lose a real payment — but it is logged as an
+error and increments `AnomalyCount` in the health report. Both shapes are physically impossible for an
+account that only receives, so treat any rise in `AnomalyCount` as something to investigate rather than a
+statistic: the usual cause is an offer or a rippling trust line the account should not have.
 
 ## Health and reconciliation
 

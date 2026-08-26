@@ -221,7 +221,99 @@ public static class TransactionFixtures
     }
     """;
 
-    /// <summary>The receiver gives up XRP and gains USD — an exchange, not a receipt.</summary>
+    /// <summary>
+    /// A payment addressed to us that also debits us — only possible if the account holds an offer or a
+    /// rippling trust line it should not. The money is still ours, so it is recorded as an anomaly.
+    /// </summary>
+    public const string PaymentToUsWithDebit = """
+    {
+      "type": "transaction",
+      "ledger_index": 109,
+      "hash": "AAAA111111111111111111111111111111111111111111111111111111111111",
+      "validated": true,
+      "meta": {
+        "TransactionIndex": 0,
+        "TransactionResult": "tesSUCCESS",
+        "AffectedNodes": [
+          {
+            "ModifiedNode": {
+              "LedgerEntryType": "AccountRoot",
+              "LedgerIndex": "AAAA",
+              "FinalFields": { "Account": "rLiooJRSKeiNfRJcDBUhu4rcjQjGLWqa4p", "Balance": "19000000" },
+              "PreviousFields": { "Balance": "20000000" }
+            }
+          },
+          {
+            "ModifiedNode": {
+              "LedgerEntryType": "RippleState",
+              "LedgerIndex": "CCCC",
+              "FinalFields": {
+                "Balance": { "currency": "USD", "issuer": "rrrrrrrrrrrrrrrrrrrrBZbvji", "value": "80" },
+                "LowLimit": { "currency": "USD", "issuer": "rLiooJRSKeiNfRJcDBUhu4rcjQjGLWqa4p", "value": "1000000" },
+                "HighLimit": { "currency": "USD", "issuer": "rXPMxBeefHGxx2K7g5qmmWq3gFsgawkoa", "value": "0" }
+              },
+              "PreviousFields": {
+                "Balance": { "currency": "USD", "issuer": "rrrrrrrrrrrrrrrrrrrrBZbvji", "value": "0" }
+              }
+            }
+          }
+        ]
+      },
+      "tx_json": {
+        "Account": "rnFApzSsKwXyTZtci4Z6nLVL8E1nLZzSBF",
+        "TransactionType": "Payment",
+        "Destination": "rLiooJRSKeiNfRJcDBUhu4rcjQjGLWqa4p",
+        "DestinationTag": 55,
+        "Amount": { "currency": "USD", "issuer": "rXPMxBeefHGxx2K7g5qmmWq3gFsgawkoa", "value": "80" },
+        "Fee": "12",
+        "Sequence": 21
+      }
+    }
+    """;
+
+    /// <summary>
+    /// A payment to somebody else that ripples through the account. Our balances move, but the money is
+    /// in transit and none of it is ours.
+    /// </summary>
+    public const string PaymentRipplingThroughUs = """
+    {
+      "type": "transaction",
+      "ledger_index": 110,
+      "hash": "BBBB222222222222222222222222222222222222222222222222222222222222",
+      "validated": true,
+      "meta": {
+        "TransactionIndex": 0,
+        "TransactionResult": "tesSUCCESS",
+        "AffectedNodes": [
+          {
+            "ModifiedNode": {
+              "LedgerEntryType": "RippleState",
+              "LedgerIndex": "EEEE",
+              "FinalFields": {
+                "Balance": { "currency": "USD", "issuer": "rrrrrrrrrrrrrrrrrrrrBZbvji", "value": "100" },
+                "LowLimit": { "currency": "USD", "issuer": "rLiooJRSKeiNfRJcDBUhu4rcjQjGLWqa4p", "value": "1000000" },
+                "HighLimit": { "currency": "USD", "issuer": "rXPMxBeefHGxx2K7g5qmmWq3gFsgawkoa", "value": "0" }
+              },
+              "PreviousFields": {
+                "Balance": { "currency": "USD", "issuer": "rrrrrrrrrrrrrrrrrrrrBZbvji", "value": "0" }
+              }
+            }
+          }
+        ]
+      },
+      "tx_json": {
+        "Account": "rnFApzSsKwXyTZtci4Z6nLVL8E1nLZzSBF",
+        "TransactionType": "Payment",
+        "Destination": "rXPMxBeefHGxx2K7g5qmmWq3gFsgawkoa",
+        "DestinationTag": 900,
+        "Amount": { "currency": "USD", "issuer": "rXPMxBeefHGxx2K7g5qmmWq3gFsgawkoa", "value": "100" },
+        "Fee": "12",
+        "Sequence": 22
+      }
+    }
+    """;
+
+    /// <summary>Our own offer being crossed by somebody else. Proceeds of a trade, not a buyer's payment.</summary>
     public const string ExchangeWithDebit = """
     {
       "type": "transaction",

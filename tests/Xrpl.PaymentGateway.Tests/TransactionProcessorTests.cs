@@ -90,12 +90,36 @@ public class TransactionProcessorTests
     }
 
     [Fact]
-    public void ATransactionThatDebitsUsIsAnAnomalyAndIsNotRecorded()
+    public void OurOwnOfferBeingCrossedIsNotAPaymentAndIsSkipped()
     {
+        // An OfferCreate by somebody else moves our balances, but the proceeds are a trade, not a payment.
         ProcessingResult result = Process(TransactionFixtures.ExchangeWithDebit);
 
-        Assert.Equal(ProcessingResultKind.Anomaly, result.Kind);
+        Assert.Equal(ProcessingResultKind.Skipped, result.Kind);
         Assert.Null(result.Record);
+    }
+
+    [Fact]
+    public void APaymentRipplingThroughUsToSomebodyElseIsSkipped()
+    {
+        ProcessingResult result = Process(TransactionFixtures.PaymentRipplingThroughUs);
+
+        Assert.Equal(ProcessingResultKind.Skipped, result.Kind);
+        Assert.Null(result.Record);
+    }
+
+    [Fact]
+    public void APaymentAddressedToUsThatAlsoDebitsUsIsRecordedAsAnAnomaly()
+    {
+        // Once the filter has established this is a Payment addressed to us, the money is a buyer's and
+        // dropping it would lose a real payment — so it is recorded, loudly.
+        ProcessingResult result = Process(TransactionFixtures.PaymentToUsWithDebit);
+
+        Assert.Equal(ProcessingResultKind.Anomaly, result.Kind);
+        PaymentRecord record = Assert.IsType<PaymentRecord>(result.Record);
+        Assert.Equal("USD", record.Currency);
+        Assert.Equal(80m, record.Value);
+        Assert.Equal(55u, record.DestinationTag);
         Assert.NotNull(result.Reason);
     }
 

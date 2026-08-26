@@ -286,7 +286,24 @@ public class XrplPaymentMonitorTests
     }
 
     [Fact]
-    public async Task AnAnomalousTransactionIsCountedAndNotDelivered()
+    public async Task AnAnomalousPaymentIsCountedButStillDelivered()
+    {
+        await using Harness harness = new Harness();
+        FakeXrplNodeConnection node = harness.Factory.For(NodeA);
+        node.Status = new NodeStatus { ServerState = "full", ValidatedLedgerIndex = 90, CompleteLedgers = "1-90" };
+        await harness.StartAsync();
+        await TestWait.UntilAsync(
+            () => harness.Snapshot.Read().State == PaymentMonitorState.Streaming, "the monitor to start streaming");
+
+        await node.PushTransactionAsync(TransactionFixtures.Parse(TransactionFixtures.PaymentToUsWithDebit));
+
+        await TestWait.UntilAsync(() => harness.Snapshot.Read().AnomalyCount == 1, "the anomaly to be counted");
+        await TestWait.UntilAsync(() => harness.Handler.Deliveries.Count == 1, "the payment to still be delivered");
+        Assert.Equal(80m, harness.Handler.Deliveries[0].Payment.Value);
+    }
+
+    [Fact]
+    public async Task ATransactionThatMovesOurBalancesWithoutBeingAPaymentToUsIsIgnored()
     {
         await using Harness harness = new Harness();
         FakeXrplNodeConnection node = harness.Factory.For(NodeA);
@@ -296,8 +313,11 @@ public class XrplPaymentMonitorTests
             () => harness.Snapshot.Read().State == PaymentMonitorState.Streaming, "the monitor to start streaming");
 
         await node.PushTransactionAsync(TransactionFixtures.Parse(TransactionFixtures.ExchangeWithDebit));
+        await node.PushTransactionAsync(TransactionFixtures.Parse(TransactionFixtures.PaymentRipplingThroughUs));
+        await Task.Delay(150, TestContext.Current.CancellationToken);
 
-        await TestWait.UntilAsync(() => harness.Snapshot.Read().AnomalyCount == 1, "the anomaly to be counted");
         Assert.Empty(harness.Handler.Deliveries);
+        Assert.Empty(harness.Store.Snapshot());
+        Assert.Equal(0, harness.Snapshot.Read().AnomalyCount);
     }
 }

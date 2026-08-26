@@ -1,5 +1,5 @@
-using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using Xrpl.Models;
 using Xrpl.Models.Common;
 using Xrpl.Models.Methods;
 using Xrpl.Models.Transactions;
@@ -10,8 +10,10 @@ namespace Xrpl.PaymentGateway.Internal;
 
 /// <summary>
 /// Turns a validated transaction into a <see cref="PaymentRecord"/>, or explains why it is not one.
-/// The amount comes from metadata balance deltas rather than the Amount field, so partial payments are
-/// recorded at what actually arrived.
+/// Only a <c>Payment</c> addressed to the receiving account qualifies — everything else that moves the
+/// account's balances (an offer of ours being crossed, a payment rippling through us to somebody else)
+/// is not money a buyer sent us. The amount comes from metadata balance deltas rather than the Amount
+/// field, so partial payments are recorded at what actually arrived.
 /// </summary>
 internal sealed class TransactionProcessor
 {
@@ -66,6 +68,28 @@ internal sealed class TransactionProcessor
             return ProcessingResult.Skip("sent by the receiving account itself");
         }
 
+        if (tx is not IPayment payment)
+        {
+            if (tx.TransactionType == TransactionType.Payment)
+            {
+                // A Payment that did not deserialize into the Payment shape would be skipped silently and
+                // take every payment with it, so say so loudly instead.
+                _logger.LogError(
+                    "transaction {Hash} is a Payment but deserialized as {Type}; it cannot be read and was skipped",
+                    transaction.Hash ?? "(no hash)",
+                    tx.GetType().Name);
+            }
+
+            return ProcessingResult.Skip($"{tx.TransactionType} is not a Payment");
+        }
+
+        // Only payments addressed to us count. A payment that merely ripples through the account on its way
+        // somewhere else also moves our balances, but none of it is ours to keep.
+        if (!string.Equals(payment.Destination, _receivingAddress, StringComparison.Ordinal))
+        {
+            return ProcessingResult.Skip("the receiving account is not the destination");
+        }
+
         string? hash = transaction.Hash;
         if (string.IsNullOrEmpty(hash))
         {
@@ -98,13 +122,6 @@ internal sealed class TransactionProcessor
             }
         }
 
-        if (debited)
-        {
-            string reason = $"transaction {hash} both credits and debits the receiving account; it is an exchange or a rippling path, not an incoming payment, and was not recorded";
-            _logger.LogError("payment anomaly: {Reason}", reason);
-            return ProcessingResult.Anomaly(null, reason);
-        }
-
         if (credits.Count == 0)
         {
             return ProcessingResult.Skip("no positive balance change");
@@ -118,7 +135,7 @@ internal sealed class TransactionProcessor
             TransactionHash = hash,
             TransactionType = tx.TransactionType.ToString(),
             Sender = tx.Account,
-            DestinationTag = ReadDestinationTag(tx),
+            DestinationTag = payment.DestinationTag,
             Currency = isXrp ? "XRP" : currency.CurrencyCode,
             Issuer = isXrp ? null : currency.Issuer,
             Value = value,
@@ -126,9 +143,20 @@ internal sealed class TransactionProcessor
             ProcessedAt = _timeProvider.GetUtcNow(),
         };
 
+        // Both of the following are physically odd for an account that only receives, and both point at
+        // the same misconfiguration: an offer or a rippling trust line the account should not have. The
+        // record is still written — this is a payment addressed to us, and dropping it would lose a real
+        // buyer's money — but the anomaly counter makes it something an operator has to look at.
+        if (debited)
+        {
+            string reason = $"payment {hash} is addressed to the receiving account but also debits it; recorded the largest credit ({record.Value} {record.Currency})";
+            _logger.LogError("payment anomaly: {Reason}", reason);
+            return ProcessingResult.Anomaly(record, reason);
+        }
+
         if (credits.Count > 1)
         {
-            string reason = $"transaction {hash} credited {credits.Count} assets; recorded the largest ({record.Value} {record.Currency})";
+            string reason = $"payment {hash} credited {credits.Count} assets; recorded the largest ({record.Value} {record.Currency})";
             _logger.LogError("payment anomaly: {Reason}", reason);
             return ProcessingResult.Anomaly(record, reason);
         }
@@ -139,26 +167,4 @@ internal sealed class TransactionProcessor
     /// <summary>XRP deltas arrive in drops on <c>ValueAsNumber</c>; <c>ValueAsXrp</c> is the human amount.</summary>
     private static decimal ToHumanUnits(Currency currency) =>
         currency.IsXrp() ? currency.ValueAsXrp ?? 0m : currency.ValueAsNumber;
-
-    /// <summary>
-    /// DestinationTag lives on Payment, not on the base transaction. The extension-data fallback keeps
-    /// tags readable on transaction types the SDK maps to the generic response.
-    /// </summary>
-    private static uint? ReadDestinationTag(TransactionResponse tx)
-    {
-        if (tx is IPayment payment && payment.DestinationTag is { } tag)
-        {
-            return tag;
-        }
-
-        if (tx.UnknownFields is { } unknown
-            && unknown.TryGetValue("DestinationTag", out JsonElement element)
-            && element.ValueKind == JsonValueKind.Number
-            && element.TryGetUInt32(out uint raw))
-        {
-            return raw;
-        }
-
-        return null;
-    }
 }
