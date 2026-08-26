@@ -1,0 +1,54 @@
+name: build and test
+
+on:
+  push:
+    branches: [dev, release]
+  pull_request:
+    branches: [dev, release]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+      - run: dotnet restore
+      - run: dotnet build --no-restore --configuration Release
+      # xunit.v3 runs on Microsoft Testing Platform; `dotnet test` on the .NET 10 SDK still routes
+      # through VSTest and refuses to run it, so the test project is executed directly.
+      - run: dotnet run --project tests/Xrpl.PaymentGateway.Tests --no-build -c Release -- -trait- "Category=Integration"
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: start standalone rippled
+        run: docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml up -d
+      - name: wait for the node
+        run: |
+          for i in $(seq 1 60); do
+            if curl -s -X POST http://localhost:5005/ -H 'Content-Type: application/json' \
+              -d '{"method":"server_info"}' | grep -q '"complete_ledgers"'; then
+              echo "node is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "node did not come up in time"
+          docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml logs
+          exit 1
+      - run: dotnet run --project tests/Xrpl.PaymentGateway.Tests -c Release -- -trait "Category=Integration"
+      - if: always()
+        run: docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml down

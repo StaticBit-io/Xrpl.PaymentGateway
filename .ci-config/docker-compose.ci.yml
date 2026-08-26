@@ -1,0 +1,35 @@
+# Bring this up with an explicit project name so it cannot collide with the XrplCSharp stand:
+#   docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml up -d
+# It publishes the same ports, so only one standalone stand can run at a time. If another project
+# already has a healthy rippled on 5005/5006/6006, use that one instead of starting this.
+services:
+  xrpld:
+    image: xrpllabsofficial/xrpld:3.3.0
+    container_name: xrplpg-rippled
+    command: ["-a", "--start"]
+    ports:
+      # Loopback only: every port below grants the admin role, which means node control, not just reads.
+      - "127.0.0.1:5005:5005"
+      - "127.0.0.1:5006:5006"
+      - "127.0.0.1:6006:6006"
+    volumes:
+      - ./rippled.cfg:/config/rippled.cfg:ro
+      - ./validators.txt:/config/validators.txt:ro
+
+  ledger-acceptor:
+    image: curlimages/curl:latest
+    container_name: xrplpg-ledger-acceptor
+    depends_on:
+      - xrpld
+    entrypoint:
+      - sh
+      - -c
+      - |
+        sleep 3
+        while true; do
+          curl -s -X POST http://xrpld:5006/ \
+            -H "Content-Type: application/json" \
+            -d '{"method":"ledger_accept"}'
+          sleep 4
+        done
+    restart: unless-stopped
