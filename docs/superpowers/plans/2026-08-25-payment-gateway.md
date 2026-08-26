@@ -33,7 +33,9 @@ These were checked against the published `Xrpl` 11.0.0 source (branch `origin/re
 | Destination tag | **Not** on the base transaction. Cast: `tx is IPayment p → p.DestinationTag` | `Xrpl/Models/Transactions/Payment.cs:192` |
 | JSON options for fixtures | `Xrpl.Client.Json.XrplJsonOptions.Default` — required when deserializing `Meta` / `TransactionStream` by hand | used in `Tests/Xrpl.Tests/Utils/GetBalanceChangesTests.cs` |
 | Standalone master account | `rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh` / seed `snoPBrXtMeMyMHUVTgbuqAfg1SUTb` | `Tests/Xrpl.Tests/Integration/Utils.cs:76` |
-| Submit + sign | `Task<Submit> Submit(ITransactionCommon tx, XrplWallet wallet, bool autofill)`, result `.EngineResult` | `Tests/Xrpl.Tests/Integration/Utils.cs` |
+| Submit + sign | `Task<Submit> Submit(ITransactionRequest tx, XrplWallet wallet, bool autoFill = true, ...)`; result `.EngineResult`, and `.Transaction` (an `ITransactionResponse`) for the hash — `.TxJson` is typed `object` and has no `Hash` | `Xrpl/Client/IXrplClient.cs:489,1021`; `Xrpl/Models/Transactions/Submit.cs:69,75` |
+| Balance helper | `GetXrpFreeBalance(this IXrplClient, string address, ...)` is an extension in namespace **`Xrpl.Sugar`** (class `BalancesSugar`) | `Xrpl/Sugar/Balances.cs:14,31` |
+| Name collision | `Xrpl.Models.Methods` declares a type named `Channel`, which is ambiguous with `System.Threading.Channels.Channel` wherever both are imported (CS0104). Alias it. | verified by compilation |
 
 Two consequences that shape the code:
 
@@ -460,12 +462,34 @@ public sealed class ReconciliationResult
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
     <PackageReference Include="xunit.v3" Version="4.0.0" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.0" />
+    <!-- The tests build a real DI container and a real host, which the Xrpl package does not bring in. -->
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.0" />
   </ItemGroup>
 </Project>
 ```
+
+**Do not add `Microsoft.NET.Test.Sdk` or `xunit.runner.visualstudio`, and do not run these tests with `dotnet test`.** This was verified empirically on this machine: xunit.v3 4.0.0 runs on Microsoft.Testing.Platform, and on the .NET 10 SDK `dotnet test` still routes through VSTest, which fails with
+
+```
+error : Testing with VSTest target is no longer supported by Microsoft.Testing.Platform on .NET 10 SDK and later.
+```
+
+Neither a `dotnet.config` with `[dotnet.test.runner]` nor the `TestingPlatformDotnetTestSupport` / `UseMicrosoftTestingPlatformRunner` properties changed that. The test project is an executable, so run it directly:
+
+```bash
+dotnet run --project tests/Xrpl.PaymentGateway.Tests
+```
+
+Filters are xunit's own, not VSTest's — `--filter "FullyQualifiedName~X"` is not understood here:
+
+| Intent | Argument |
+|---|---|
+| One test class | `-class "Xrpl.PaymentGateway.Tests.LedgerRangeSetTests"` |
+| Only integration tests | `-trait "Category=Integration"` |
+| Everything except integration | `-trait- "Category=Integration"` |
+
+Arguments go after `--`, for example `dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -trait- "Category=Integration"`.
 
 - [ ] **Step 11: Write a scaffolding test that proves the harness runs**
 
@@ -517,10 +541,19 @@ dotnet sln add src/Xrpl.PaymentGateway.Abstractions/Xrpl.PaymentGateway.Abstract
 - [ ] **Step 13: Restore, build and run the test**
 
 ```bash
-dotnet test --nologo
+dotnet run --project tests/Xrpl.PaymentGateway.Tests
 ```
 
-Expected: build succeeds for all three target frameworks, one test passes. If `xunit.v3` 4.0.0 and `xunit.runner.visualstudio` 4.0.0 fail to produce a runnable harness, fall back to `xunit.v3` 3.2.2 with `xunit.runner.visualstudio` 3.1.5 and re-run — do not proceed to Task 2 until a test actually executes.
+Expected output ends with a summary line from the xUnit v3 in-process runner:
+
+```
+=== TEST EXECUTION SUMMARY ===
+   Xrpl.PaymentGateway.Tests  Total: 1, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0
+```
+
+Do not proceed to Task 2 until a test actually executes. This exact combination — `xunit.v3` 4.0.0, .NET 10
+SDK, `net8.0;net9.0;net10.0` libraries, `Xrpl` 11.0.0 — was verified working on this machine, so a failure
+here means something diverged from the plan rather than a package incompatibility to work around.
 
 - [ ] **Step 14: Commit**
 
@@ -654,7 +687,7 @@ public class InMemoryPaymentStoreTests
 - [ ] **Step 2: Run the tests to verify they fail**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~InMemoryPaymentStoreTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.InMemoryPaymentStoreTests"
 ```
 
 Expected: compile error, `InMemoryPaymentStore` does not exist.
@@ -823,7 +856,7 @@ public sealed class InMemoryPaymentStore : IPaymentStore
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~InMemoryPaymentStoreTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.InMemoryPaymentStoreTests"
 ```
 
 Expected: 7 tests pass.
@@ -927,7 +960,7 @@ public class LedgerRangeSetTests
 - [ ] **Step 2: Run the tests to verify they fail**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~LedgerRangeSetTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.LedgerRangeSetTests"
 ```
 
 Expected: compile error, `LedgerRangeSet` does not exist.
@@ -1054,7 +1087,7 @@ internal sealed class LedgerRangeSet
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~LedgerRangeSetTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.LedgerRangeSetTests"
 ```
 
 Expected: 12 tests pass (the `Theory` contributes 6).
@@ -1595,7 +1628,7 @@ public class TransactionProcessorTests
 - [ ] **Step 4: Run the tests to verify they fail**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~TransactionProcessorTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.TransactionProcessorTests"
 ```
 
 Expected: compile error, `TransactionProcessor` and `ProcessingResult` do not exist.
@@ -1822,7 +1855,7 @@ internal sealed class TransactionProcessor
 - [ ] **Step 7: Run the tests to verify they pass**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~TransactionProcessorTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.TransactionProcessorTests"
 ```
 
 Expected: 11 tests pass. If `AnIouPaymentCarriesTheCurrencyAndIssuer` reports the counterparty rather than the issuer, that is correct behaviour and the fixture is wrong, not the code: `BalanceChanges` reports the trust line counterparty as `Issuer`, which for a receiving account that is not itself an issuer is the token issuer.
@@ -2137,7 +2170,7 @@ public class StoreRetryPolicyTests
 - [ ] **Step 4: Run both test classes to verify they fail**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~PaymentDispatcherTests|FullyQualifiedName~StoreRetryPolicyTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.PaymentDispatcherTests" -class "Xrpl.PaymentGateway.Tests.StoreRetryPolicyTests"
 ```
 
 Expected: compile error, `PaymentDispatcher` and `StoreRetryPolicy` do not exist.
@@ -2317,7 +2350,7 @@ internal sealed class PaymentDispatcher
 - [ ] **Step 7: Run the tests to verify they pass**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~PaymentDispatcherTests|FullyQualifiedName~StoreRetryPolicyTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.PaymentDispatcherTests" -class "Xrpl.PaymentGateway.Tests.StoreRetryPolicyTests"
 ```
 
 Expected: 10 tests pass.
@@ -2402,7 +2435,7 @@ public class NodePoolTests
 - [ ] **Step 2: Run the tests to verify they fail**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~NodePoolTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.NodePoolTests"
 ```
 
 Expected: compile error, `NodePool` does not exist.
@@ -2573,8 +2606,13 @@ using Xrpl.PaymentGateway.Internal;
 
 namespace Xrpl.PaymentGateway.Tests.Fakes;
 
-/// <summary>A scriptable stand-in for a node session. Tests drive the callbacks by hand.</summary>
-public sealed class FakeXrplNodeConnection : IXrplNodeConnection
+/// <summary>
+/// A scriptable stand-in for a node session. Tests drive the callbacks by hand.
+/// This must be internal: its members expose <c>NodeStatus</c> and the query types, which are internal,
+/// and a public member may not expose a less accessible type (CS0050/CS0053). xUnit discovers internal
+/// test classes and fixtures without complaint.
+/// </summary>
+internal sealed class FakeXrplNodeConnection : IXrplNodeConnection
 {
     private readonly Queue<AccountTransactionPage> _pages = new Queue<AccountTransactionPage>();
 
@@ -2670,7 +2708,7 @@ public sealed class FakeXrplNodeConnection : IXrplNodeConnection
 }
 
 /// <summary>Hands out pre-built fakes per node URI, creating one on first request.</summary>
-public sealed class FakeXrplNodeConnectionFactory : IXrplNodeConnectionFactory
+internal sealed class FakeXrplNodeConnectionFactory : IXrplNodeConnectionFactory
 {
     private readonly Dictionary<Uri, FakeXrplNodeConnection> _connections = new Dictionary<Uri, FakeXrplNodeConnection>();
 
@@ -2700,7 +2738,7 @@ The fake ignores `DisposeAsync` for reuse across sessions on purpose: a test tha
 - [ ] **Step 6: Run the tests to verify they pass**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~NodePoolTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.NodePoolTests"
 ```
 
 Expected: 4 tests pass, and the whole solution still builds.
@@ -2847,7 +2885,7 @@ public class CatchUpRunnerTests
 - [ ] **Step 2: Run the tests to verify they fail**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~CatchUpRunnerTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.CatchUpRunnerTests"
 ```
 
 Expected: compile error, `CatchUpRunner` does not exist.
@@ -2978,7 +3016,7 @@ internal sealed class CatchUpRunner
 - [ ] **Step 5: Run the tests to verify they pass**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~CatchUpRunnerTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.CatchUpRunnerTests"
 ```
 
 Expected: 6 tests pass.
@@ -3077,7 +3115,7 @@ public class PaymentGatewayOptionsValidatorTests
 - [ ] **Step 2: Run the tests to verify they fail**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~PaymentGatewayOptionsValidatorTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.PaymentGatewayOptionsValidatorTests"
 ```
 
 Expected: compile error, `PaymentGatewayOptions` does not exist.
@@ -3377,7 +3415,7 @@ internal sealed class MonitorSnapshotData
 - [ ] **Step 6: Run the tests to verify they pass**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~PaymentGatewayOptionsValidatorTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.PaymentGatewayOptionsValidatorTests"
 ```
 
 Expected: 6 tests pass.
@@ -3452,8 +3490,9 @@ public class XrplPaymentMonitorTests
 
     private sealed class Harness : IAsyncDisposable
     {
-        public Harness(Action<PaymentGatewayOptions>? configure = null)
+        public Harness(Action<PaymentGatewayOptions>? configure = null, uint firstDestinationTag = 1)
         {
+            Store = new InMemoryPaymentStore(firstDestinationTag);
             Options = new PaymentGatewayOptions
             {
                 Address = TransactionFixtures.Receiver,
@@ -3481,7 +3520,7 @@ public class XrplPaymentMonitorTests
 
         public FakeXrplNodeConnectionFactory Factory { get; } = new FakeXrplNodeConnectionFactory();
 
-        public InMemoryPaymentStore Store { get; } = new InMemoryPaymentStore();
+        public InMemoryPaymentStore Store { get; }
 
         public RecordingHandler Handler { get; } = new RecordingHandler();
 
@@ -3512,6 +3551,10 @@ public class XrplPaymentMonitorTests
         Assert.Equal(TransactionFixtures.Receiver, node.SubscribedAccount);
         Assert.Empty(node.Queries);
         Assert.Equal(900u, harness.Snapshot.Read().Cursor);
+
+        // The starting point must reach the store, not just the in-memory snapshot: a restart before the
+        // first ledger close would otherwise pick "current validated" again and skip the interval.
+        Assert.Equal(900u, await harness.Store.GetLastProcessedLedgerAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -3563,24 +3606,53 @@ public class XrplPaymentMonitorTests
     }
 
     [Fact]
-    public async Task ALiveTransactionIsRecordedAndDelivered()
+    public async Task AFrozenCursorStaysFrozenEvenAsLedgersKeepClosing()
     {
         await using Harness harness = new Harness();
+        await harness.Store.SetLastProcessedLedgerAsync(100, TestContext.Current.CancellationToken);
+        foreach (Uri node in new[] { NodeA, NodeB })
+        {
+            harness.Factory.For(node).Status = new NodeStatus
+            {
+                ServerState = "full",
+                ValidatedLedgerIndex = 900,
+                CompleteLedgers = "800-900",
+            };
+        }
+
+        await harness.StartAsync();
+        await TestWait.UntilAsync(
+            () => harness.Snapshot.Read().State == PaymentMonitorState.HistoryGap, "the monitor to report a history gap");
+
+        // The live stream keeps running. If the cursor followed it, ledgers 101-900 would be written off as
+        // searched and the gap would become permanent and invisible.
+        await harness.Factory.For(NodeA).PushLedgerAsync(901);
+        await harness.Factory.For(NodeA).PushLedgerAsync(902);
+        await Task.Delay(200, TestContext.Current.CancellationToken);
+
+        Assert.Equal(100u, await harness.Store.GetLastProcessedLedgerAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(PaymentMonitorState.HistoryGap, harness.Snapshot.Read().State);
+    }
+
+    [Fact]
+    public async Task ALiveTransactionIsRecordedAndDeliveredToTheBuyerBehindTheTag()
+    {
+        // The fixture carries DestinationTag 42, so the store must hand tag 42 to the buyer for the two to meet.
+        await using Harness harness = new Harness(firstDestinationTag: 42);
         FakeXrplNodeConnection node = harness.Factory.For(NodeA);
         node.Status = new NodeStatus { ServerState = "full", ValidatedLedgerIndex = 90, CompleteLedgers = "1-90" };
         await harness.StartAsync();
         await TestWait.UntilAsync(
             () => harness.Snapshot.Read().State == PaymentMonitorState.Streaming, "the monitor to start streaming");
         uint tag = await harness.Store.GetOrAssignTagAsync("buyer-42", TestContext.Current.CancellationToken);
-        Assert.Equal(42u, TagInFixture());
+        Assert.Equal(42u, tag);
 
         await node.PushTransactionAsync(TransactionFixtures.Parse(TransactionFixtures.XrpPayment));
 
         await TestWait.UntilAsync(() => harness.Handler.Deliveries.Count == 1, "the payment to reach the handler");
         Assert.Equal(1m, harness.Handler.Deliveries[0].Payment.Value);
+        Assert.Equal("buyer-42", harness.Handler.Deliveries[0].BuyerId);
         Assert.Empty(await harness.Store.GetUnhandledPaymentsAsync(10, TestContext.Current.CancellationToken));
-
-        static uint TagInFixture() => 42;
     }
 
     [Fact]
@@ -3707,7 +3779,7 @@ public class XrplPaymentMonitorTests
 - [ ] **Step 3: Run the tests to verify they fail**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~XrplPaymentMonitorTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.XrplPaymentMonitorTests"
 ```
 
 Expected: compile error, `XrplPaymentMonitor` does not exist.
@@ -3725,13 +3797,22 @@ using Xrpl.Models.Methods;
 using Xrpl.PaymentGateway.Abstractions;
 using Xrpl.PaymentGateway.Internal;
 
+// Both Xrpl.Models.Methods and System.Threading.Channels define a type named Channel, so the bare name
+// is ambiguous (CS0104) on the static CreateBounded call. The generic Channel<T> resolves by arity.
+using Channel = System.Threading.Channels.Channel;
+
 namespace Xrpl.PaymentGateway;
 
 /// <summary>
 /// Follows the receiving account and records what arrives. One session at a time, one node at a time;
 /// every session starts by subscribing, then replaying whatever happened while it was away.
 /// </summary>
-public sealed class XrplPaymentMonitor : BackgroundService
+/// <remarks>
+/// Internal because its constructor takes internal types (<c>MonitorSnapshot</c>,
+/// <c>IXrplNodeConnectionFactory</c>) and a public constructor may not expose less accessible types
+/// (CS0051). Hosts reach it through <see cref="IHostedService"/>; tests see it via InternalsVisibleTo.
+/// </remarks>
+internal sealed class XrplPaymentMonitor : BackgroundService
 {
     private readonly PaymentGatewayOptions _options;
     private readonly IXrplNodeConnectionFactory _connectionFactory;
@@ -3746,6 +3827,15 @@ public sealed class XrplPaymentMonitor : BackgroundService
     private readonly StoreRetryPolicy _storeRetry;
 
     private uint _persistedCursor;
+
+    /// <summary>
+    /// Set when a catch-up could not be proven complete. While it holds a value, the cursor is frozen:
+    /// advancing it past an unverified range would turn a visible gap into a permanent, invisible one.
+    /// </summary>
+    private uint? _unprovenFromLedger;
+
+    /// <summary>The state to restore once the store comes back.</summary>
+    private PaymentMonitorState _stateBeforeStoreOutage = PaymentMonitorState.Connecting;
 
     public XrplPaymentMonitor(
         IOptions<PaymentGatewayOptions> options,
@@ -3775,7 +3865,13 @@ public sealed class XrplPaymentMonitor : BackgroundService
             {
                 if (!available)
                 {
+                    _stateBeforeStoreOutage = _snapshot.Read().State;
                     _snapshot.SetState(PaymentMonitorState.StoreUnavailable);
+                }
+                else if (_snapshot.Read().State == PaymentMonitorState.StoreUnavailable)
+                {
+                    // Without this the health report keeps claiming the store is down long after it came back.
+                    _snapshot.SetState(_stateBeforeStoreOutage);
                 }
             });
     }
@@ -3909,11 +4005,18 @@ public sealed class XrplPaymentMonitor : BackgroundService
 
         if (storedCursor is null)
         {
-            await PersistCursorAsync(cursor, cancellationToken).ConfigureAwait(false);
+            // Written directly rather than through PersistCursorAsync, whose "already at or past this"
+            // guard would swallow it. Without this write, a restart before the first ledger close would
+            // start from the current validated ledger again and skip whatever arrived in between.
+            await _storeRetry.ExecuteAsync(
+                token => _store.SetLastProcessedLedgerAsync(cursor, token),
+                "SetLastProcessedLedger",
+                cancellationToken).ConfigureAwait(false);
         }
 
         if (cursor >= validated)
         {
+            _unprovenFromLedger = null;
             _snapshot.SetState(PaymentMonitorState.Streaming);
             return validated;
         }
@@ -3923,13 +4026,18 @@ public sealed class XrplPaymentMonitor : BackgroundService
 
         if (result.Completed)
         {
+            _unprovenFromLedger = null;
             await PersistCursorAsync(validated, cancellationToken).ConfigureAwait(false);
             _snapshot.SetState(PaymentMonitorState.Streaming);
         }
         else
         {
+            // The cursor must stay put. Letting it follow the live stream would move the proven-completeness
+            // boundary past ledgers nobody ever searched, and the next restart would never look at them
+            // again — a visible gap silently becoming a permanent one.
+            _unprovenFromLedger = cursor + 1;
             _logger.LogError(
-                "catch-up over ledgers {From}-{To} could not be proven complete on any node: {Reason}. The cursor stays at {Cursor}; add a full-history node to close the gap.",
+                "catch-up over ledgers {From}-{To} could not be proven complete on any node: {Reason}. The cursor stays frozen at {Cursor} and new payments are still recorded; add a full-history node to close the gap.",
                 cursor + 1,
                 validated,
                 result.Reason,
@@ -4062,6 +4170,14 @@ public sealed class XrplPaymentMonitor : BackgroundService
                 lastSeenValidated = closed;
                 lastProgress = _timeProvider.GetUtcNow();
                 _snapshot.SetValidatedLedger(closed, lastProgress);
+
+                if (_unprovenFromLedger is not null)
+                {
+                    // An unproven range is still open behind us. Keep recording live payments, but neither
+                    // advance the cursor nor let the state read as healthy.
+                    continue;
+                }
+
                 _snapshot.SetState(PaymentMonitorState.Streaming);
                 await PersistCursorAsync(closed - 1, cancellationToken).ConfigureAwait(false);
             }
@@ -4098,29 +4214,44 @@ public sealed class XrplPaymentMonitor : BackgroundService
             return false;
         }
 
-        Uri candidate = _pool.Peek();
-        if (candidate == connection.Node)
+        // Every other node in the pool gets asked, not just the next one. With three or more nodes, two
+        // stuck peers would otherwise outvote a third that is still advancing, and the monitor would sit
+        // on a lagging node calling it a network outage.
+        foreach (Uri candidate in _pool.Nodes)
         {
-            return true;
+            if (candidate == connection.Node)
+            {
+                continue;
+            }
+
+            try
+            {
+                await using IXrplNodeConnection probe = _connectionFactory.Create(candidate);
+                await probe.ConnectAsync(cancellationToken).ConfigureAwait(false);
+                NodeStatus other = await probe.GetNodeStatusAsync(cancellationToken).ConfigureAwait(false);
+
+                if (other.IsSynced && other.ValidatedLedgerIndex > current.ValidatedLedgerIndex)
+                {
+                    _logger.LogInformation(
+                        "node {Other} is ahead at ledger {Ahead} while {Node} sits at {Behind}; this is a node problem, not a network one",
+                        candidate,
+                        other.ValidatedLedgerIndex,
+                        connection.Node,
+                        current.ValidatedLedgerIndex);
+                    return false;
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "probing {Node} for a second opinion failed", candidate);
+            }
         }
 
-        try
-        {
-            await using IXrplNodeConnection probe = _connectionFactory.Create(candidate);
-            await probe.ConnectAsync(cancellationToken).ConfigureAwait(false);
-            NodeStatus other = await probe.GetNodeStatusAsync(cancellationToken).ConfigureAwait(false);
-
-            return other.IsSynced && other.ValidatedLedgerIndex <= current.ValidatedLedgerIndex;
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "probing {Node} for a second opinion failed", candidate);
-            return false;
-        }
+        return true;
     }
 
     private async Task ProcessTransactionAsync(IAccountTransaction transaction, CancellationToken cancellationToken)
@@ -4184,7 +4315,7 @@ Note on the fresh-store path: the cursor is persisted immediately so a restart b
 - [ ] **Step 5: Run the tests to verify they pass**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~XrplPaymentMonitorTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.XrplPaymentMonitorTests"
 ```
 
 Expected: 10 tests pass. If `ADroppedSessionReconnectsToTheNextNodeInThePool` is flaky, raise the `TestWait` timeout rather than adding sleeps to the monitor.
@@ -4455,7 +4586,7 @@ public class PaymentMonitorHealthTests
 - [ ] **Step 3: Run both test classes to verify they fail**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~XrplPaymentGatewayTests|FullyQualifiedName~PaymentMonitorHealthTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.XrplPaymentGatewayTests" -class "Xrpl.PaymentGateway.Tests.PaymentMonitorHealthTests"
 ```
 
 Expected: compile error, `XrplPaymentGateway` and `PaymentMonitorHealth` do not exist.
@@ -4514,7 +4645,12 @@ namespace Xrpl.PaymentGateway;
 /// Liveness reporting and repair. Neither method drives the monitor: reconciliation is a safety net, and
 /// the monitor stays correct whether or not anybody ever calls it.
 /// </summary>
-public sealed class PaymentMonitorHealth : IPaymentMonitorHealth
+/// <remarks>
+/// Internal for the same reason as the monitor: the constructor takes the internal
+/// <c>MonitorSnapshot</c> and <c>IXrplNodeConnectionFactory</c>, and a public constructor may not expose
+/// less accessible types (CS0051). Hosts resolve it as <see cref="IPaymentMonitorHealth"/>.
+/// </remarks>
+internal sealed class PaymentMonitorHealth : IPaymentMonitorHealth
 {
     private readonly PaymentGatewayOptions _options;
     private readonly IPaymentStore _store;
@@ -4681,7 +4817,13 @@ public sealed class PaymentMonitorHealth : IPaymentMonitorHealth
                     _options.Address,
                     from,
                     cursor,
-                    (transaction, token) => RecoverAsync(transaction, count => recovered = count, () => recovered, token),
+                    async (transaction, token) =>
+                    {
+                        if (await RecoverAsync(transaction, token).ConfigureAwait(false))
+                        {
+                            recovered++;
+                        }
+                    },
                     cancellationToken).ConfigureAwait(false);
 
                 if (result.Completed)
@@ -4704,31 +4846,28 @@ public sealed class PaymentMonitorHealth : IPaymentMonitorHealth
         return recovered;
     }
 
-    private async Task RecoverAsync(
-        IAccountTransaction transaction,
-        Action<int> setRecovered,
-        Func<int> getRecovered,
-        CancellationToken cancellationToken)
+    /// <summary>Returns true when the payment was missing from the store and had to be recorded now.</summary>
+    private async Task<bool> RecoverAsync(IAccountTransaction transaction, CancellationToken cancellationToken)
     {
         ProcessingResult result = _processor.Process(transaction);
         if (result.Record is not { } record)
         {
-            return;
+            return false;
         }
 
         bool isNew = await _dispatcher.RecordAsync(record, cancellationToken).ConfigureAwait(false);
         if (!isNew)
         {
-            return;
+            return false;
         }
 
-        setRecovered(getRecovered() + 1);
         _logger.LogError(
             "reconciliation found payment {Hash} in ledger {Ledger} that the monitor never recorded; it has been recorded now",
             record.TransactionHash,
             record.LedgerIndex);
 
         await _dispatcher.DeliverAsync(record, cancellationToken).ConfigureAwait(false);
+        return true;
     }
 }
 ```
@@ -4736,7 +4875,7 @@ public sealed class PaymentMonitorHealth : IPaymentMonitorHealth
 - [ ] **Step 6: Run the tests to verify they pass**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~XrplPaymentGatewayTests|FullyQualifiedName~PaymentMonitorHealthTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.XrplPaymentGatewayTests" -class "Xrpl.PaymentGateway.Tests.PaymentMonitorHealthTests"
 ```
 
 Expected: 11 tests pass.
@@ -4837,7 +4976,7 @@ public class ServiceCollectionExtensionsTests
 - [ ] **Step 2: Run the tests to verify they fail**
 
 ```bash
-dotnet test --nologo --filter "FullyQualifiedName~ServiceCollectionExtensionsTests"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -class "Xrpl.PaymentGateway.Tests.ServiceCollectionExtensionsTests"
 ```
 
 Expected: compile error, `AddXrplPaymentGateway` does not exist.
@@ -4851,6 +4990,7 @@ using Microsoft.Extensions.Logging;
 using Xrpl.Client;
 using Xrpl.Models;
 using Xrpl.Models.Methods;
+using Xrpl.Models.Subscriptions;
 
 namespace Xrpl.PaymentGateway.Internal;
 
@@ -5006,7 +5146,7 @@ internal sealed class XrplNodeConnection : IXrplNodeConnection
 }
 ```
 
-The `using Xrpl.Models;` import is what brings `StreamType` in — it lives in `Xrpl.Models`, not `Xrpl.Models.Enums`, despite the file path.
+Two import traps in this one file: `StreamType` lives in `Xrpl.Models`, not `Xrpl.Models.Enums`, despite the file path; and `TransactionStream` lives in `Xrpl.Models.Subscriptions`, which nothing else here pulls in.
 
 - [ ] **Step 4: Write the factory**
 
@@ -5074,7 +5214,7 @@ public static class ServiceCollectionExtensions
 - [ ] **Step 6: Run the whole suite**
 
 ```bash
-dotnet test --nologo
+dotnet run --project tests/Xrpl.PaymentGateway.Tests
 ```
 
 Expected: every test from Tasks 1-11 passes.
@@ -5190,7 +5330,11 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 // The store is the host's choice. This sample keeps everything in memory; swapping in Postgres or a
 // file is a matter of implementing IPaymentStore, with no change to anything below.
-builder.Services.AddSingleton<InMemoryPaymentStore>(_ => new InMemoryPaymentStore());
+// Note that tag allocation belongs to the store, so the store is where the first tag is configured —
+// PaymentGatewayOptions.FirstDestinationTag is the value to hand it, not a setting the library applies
+// behind your back.
+uint firstTag = builder.Configuration.GetValue<uint?>("Xrpl:FirstDestinationTag") ?? 1;
+builder.Services.AddSingleton<InMemoryPaymentStore>(_ => new InMemoryPaymentStore(firstTag));
 builder.Services.AddSingleton<IPaymentStore>(services => services.GetRequiredService<InMemoryPaymentStore>());
 
 builder.Services.AddSingleton<SamplePaymentHandler>();
@@ -5203,6 +5347,7 @@ builder.Services.AddXrplPaymentGateway(options =>
     options.Nodes = (builder.Configuration.GetSection("Xrpl:Nodes").Get<string[]>() ?? ["ws://localhost:6006"])
         .Select(node => new Uri(node))
         .ToArray();
+    options.FirstDestinationTag = firstTag;
 });
 
 WebApplication app = builder.Build();
@@ -5246,7 +5391,8 @@ app.Run();
   "AllowedHosts": "*",
   "Xrpl": {
     "Address": "",
-    "Nodes": [ "ws://localhost:6006" ]
+    "Nodes": [ "ws://localhost:6006" ],
+    "FirstDestinationTag": 1
   }
 }
 ```
@@ -5347,6 +5493,7 @@ using Xrpl.Client;
 using Xrpl.Models.Common;
 using Xrpl.Models.Methods;
 using Xrpl.Models.Transactions;
+using Xrpl.Sugar;
 using Xrpl.Wallet;
 
 namespace Xrpl.PaymentGateway.Tests.Integration;
@@ -5458,12 +5605,14 @@ public static class StandaloneFixture
             throw new InvalidOperationException($"payment failed with {response.EngineResult}");
         }
 
-        return response.TxJson?.Hash ?? string.Empty;
+        // Submit.TxJson is declared as object, so it has no Hash. Submit.Transaction is the computed
+        // ITransactionResponse that does.
+        return response.Transaction?.Hash ?? string.Empty;
     }
 }
 ```
 
-If `Submit.TxJson` turns out to carry a different property name for the hash, drop the return value entirely — the test asserts on the handler's delivery, not on this hash.
+`GetXrpFreeBalance` is an extension method on `IXrplClient` from `Xrpl.Sugar` (class `BalancesSugar`), which is why that import is there; `Submit` is an ordinary instance method on the client and needs nothing extra.
 
 - [ ] **Step 4: Write the end-to-end test**
 
@@ -5611,11 +5760,24 @@ public class EndToEndPaymentTests
 
 If `Assert.Skip` is unavailable in the installed xUnit version, replace each skip with an early `return` and a `Console.WriteLine` explaining why, and keep the `Category=Integration` trait as the real gate.
 
-- [ ] **Step 5: Start the stand**
+- [ ] **Step 5: Check whether a stand is already running before starting one**
+
+```bash
+docker ps --format "{{.Names}}\t{{.Ports}}"
+```
+
+On this machine a standalone `rippled` 3.3.0 from the neighbouring `xrpl-video-platform` project already
+occupies 5005/5006/6006 and is healthy (`server_state: proposing`, `complete_ledgers: 2-…`, master account
+funded). **Use it as-is and skip to Step 6** — do not bring it down and do not start a second stand, which
+would fail on the ports anyway. Start our own only when nothing is listening there:
 
 ```bash
 docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml up -d
 ```
+
+Worth noting for the code: that node reports `proposing`, not `full`. `NodeStatus.IsSynced` accepts
+`full`, `validating` and `proposing` precisely for this reason — narrowing it to `full` would make the
+monitor treat a perfectly healthy standalone node as stalled.
 
 Wait for the node to answer, then confirm it is producing ledgers:
 
@@ -5628,7 +5790,7 @@ Expected: JSON responses from `ledger_accept` with an increasing `ledger_current
 - [ ] **Step 6: Run the unit tests without the integration ones**
 
 ```bash
-dotnet test --nologo --filter "Category!=Integration"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -trait- "Category=Integration"
 ```
 
 Expected: every unit test passes.
@@ -5636,16 +5798,18 @@ Expected: every unit test passes.
 - [ ] **Step 7: Run the integration tests**
 
 ```bash
-dotnet test --nologo --filter "Category=Integration"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -trait "Category=Integration"
 ```
 
 Expected: both tests pass. If the first hangs at "the monitor to reach the streaming state", check `docker logs xrplpg-rippled` — an unreachable node surfaces as a connection error in the test host's log output.
 
-- [ ] **Step 8: Stop the stand**
+- [ ] **Step 8: Stop the stand — only if you started it**
 
 ```bash
 docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml down
 ```
+
+Skip this entirely if you reused the neighbouring project's node in Step 5.
 
 - [ ] **Step 9: Commit**
 
@@ -5759,14 +5923,14 @@ the monitor should never let that happen.
 ## Development
 
 ```
-dotnet test --filter "Category!=Integration"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -trait- "Category=Integration"
 ```
 
 Integration tests need a standalone node:
 
 ```
 docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml up -d
-dotnet test --filter "Category=Integration"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -trait "Category=Integration"
 docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml down
 ```
 
@@ -5803,7 +5967,7 @@ jobs:
             10.0.x
       - run: dotnet restore
       - run: dotnet build --no-restore --configuration Release
-      - run: dotnet test --no-build --configuration Release --filter "Category!=Integration"
+      - run: dotnet run --project tests/Xrpl.PaymentGateway.Tests --no-build -c Release -- -trait- "Category=Integration"
 
   integration:
     runs-on: ubuntu-latest
@@ -5827,7 +5991,7 @@ jobs:
           echo "node did not come up in time"
           docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml logs
           exit 1
-      - run: dotnet test --configuration Release --filter "Category=Integration"
+      - run: dotnet run --project tests/Xrpl.PaymentGateway.Tests -c Release -- -trait "Category=Integration"
       - if: always()
         run: docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml down
 ```
@@ -5859,7 +6023,7 @@ dotnet build --nologo --configuration Release
 Then:
 
 ```bash
-dotnet test --nologo --configuration Release --filter "Category!=Integration"
+dotnet run --project tests/Xrpl.PaymentGateway.Tests -c Release -- -trait- "Category=Integration"
 ```
 
 Expected: a clean build for all three target frameworks and a fully green unit suite.
@@ -5894,13 +6058,54 @@ Checked against `docs/specs/2026-08-25-payment-gateway-design.md`:
 | Docker standalone integration tests | 13 |
 | Private repo, English artifacts, CI | 14 |
 
-Two deliberate additions beyond the spec, both consistent with it:
+Deliberate additions beyond the spec, all consistent with it:
 
 1. **Debit-and-credit transactions are refused, not recorded.** The spec covered multiple credits but not a
    simultaneous debit. Recording a phantom payment could release goods for value not received, so the safer
    reading of "no silent loss" is a loud refusal: error log, anomaly counter, health report.
 2. **`NetworkStallProbeInterval`** exists so the network-stall probe runs at the 30-second cadence the spec
    names, rather than inheriting the 20-second stall timeout.
+3. **Extra options not named in the spec:** `StoreRetryBaseDelay` / `StoreRetryMaxDelay`,
+   `HealthUnhandledSampleSize`, `MaxAcceptableLedgerLag`. All three exist because the spec's behaviour
+   needs a number and hard-coding one would be worse.
+4. **Extra report fields:** `PaymentMonitorHealthReport.IsHealthy` and `.LastLedgerAt`, and
+   `ReconciliationResult.Skipped`. The first two let a `/health` endpoint answer without re-deriving the
+   rule; the third distinguishes "nothing to do" from "another run held the lock".
+5. **`XrplPaymentMonitor` and `PaymentMonitorHealth` are internal, not public.** Their constructors take
+   internal types, and C# forbids a public constructor exposing less accessible types. Hosts reach them
+   through `IHostedService` and `IPaymentMonitorHealth`, so the public surface loses nothing.
 
-Both are recorded here rather than silently absorbed, and the spec should be amended if they are accepted.
+These are recorded rather than silently absorbed, and the spec should be amended if they are accepted.
+
+### Corrections applied after review
+
+An independent review of this plan against the SDK sources, plus a compile-and-run probe of the toolchain,
+found defects that are now fixed here. Recorded so the same ground is not re-covered:
+
+| Defect | Where it was | Fix |
+|---|---|---|
+| Public classes with internal-typed constructor parameters — CS0051, would not compile | Tasks 9, 10 | `XrplPaymentMonitor` and `PaymentMonitorHealth` are internal |
+| Public test fakes exposing internal types — CS0050/CS0053 | Task 6 | Both fakes are internal |
+| **Cursor advanced past an unproven range after `HistoryGap`**, turning a visible gap into a permanent invisible one, and `Streaming` overwrote the `HistoryGap` state | Task 9 | `_unprovenFromLedger` freezes the cursor and the state until a catch-up proves the range; new test `AFrozenCursorStaysFrozenEvenAsLedgersKeepClosing` |
+| Fresh-store cursor never reached the store: `_persistedCursor` was set first, so `PersistCursorAsync`'s guard swallowed the write | Task 9 | Direct store write; the fresh-store test now asserts on the store |
+| `response.TxJson?.Hash` — `TxJson` is `object`, CS1061 | Task 13 | `response.Transaction?.Hash` |
+| `GetXrpFreeBalance` unresolved — it is an extension in `Xrpl.Sugar` | Task 13 | `using Xrpl.Sugar;` |
+| `TransactionStream` unresolved in the real connection | Task 11 | `using Xrpl.Models.Subscriptions;` |
+| Test project could not compile `ServiceCollection` / `Host.CreateApplicationBuilder` | Task 1 | Added `Microsoft.Extensions.Hosting` |
+| `Assert.Equal(42u, TagInFixture())` was a tautology; the tag-to-buyer link was never exercised at monitor level | Task 9 | Harness takes `firstDestinationTag`; the test asserts the resolved `BuyerId` |
+| Network-stall verdict polled one peer, not the pool, so two stuck nodes could outvote a healthy third | Task 9 | Full pool cycle |
+| `StoreUnavailable` never cleared after the store recovered | Task 9 | Previous state restored on recovery |
+| `FirstDestinationTag` was validated but never consumed by anything | Task 12 | The sample passes it to the store and the docs explain that tag allocation belongs to the store |
+| Counter threaded through `Action<int>`/`Func<int>` for no reason | Task 10 | `RecoverAsync` returns `bool` |
+| **`dotnet test` does not work at all here**: xunit.v3 4.0.0 runs on Microsoft.Testing.Platform, and the .NET 10 SDK's `dotnet test` still routes through VSTest | Task 1 and every task's run step | Test project is an executable run via `dotnet run --project`, with xunit's own `-class` / `-trait` / `-trait-` filters |
+| `Channel.CreateBounded` ambiguous between `System.Threading.Channels` and `Xrpl.Models.Methods` — CS0104 | Task 9 | `using Channel = System.Threading.Channels.Channel;` |
+
+Verified by compilation across `net8.0`, `net9.0` and `net10.0` before this plan was finalised: the balance-change
+call, the `Currency` amount semantics, `IPayment.DestinationTag`, `IAccountTransaction` covering both the
+stream and history types, the `account_tx` request and response shapes, the `server_info` fields, and
+`Task.Delay` with a `TimeProvider`.
+
+Two known gaps left open on purpose: there is no monitor-level test for "store outage pauses without moving
+the cursor" (only the `StoreRetryPolicy` unit tests), and the integration test for catch-up simulates a
+missed window by pinning the cursor rather than physically severing the socket.
 
