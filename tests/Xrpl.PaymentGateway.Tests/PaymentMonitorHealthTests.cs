@@ -207,7 +207,10 @@ public class PaymentMonitorHealthTests
         harness.Scripted.HoldUnhandledReads = gate;
 
         Task<ReconciliationResult> first = harness.Health.ReconcileAsync(TestContext.Current.CancellationToken);
-        await TestWait.UntilAsync(() => !first.IsCompleted, "the first run to be in flight");
+
+        // Wait for the first run to be genuinely inside the store call, not merely unfinished.
+        await harness.Scripted.UnhandledReadStarted.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         ReconciliationResult second = await harness.Health.ReconcileAsync(TestContext.Current.CancellationToken);
 

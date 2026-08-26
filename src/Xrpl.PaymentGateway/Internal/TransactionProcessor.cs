@@ -38,6 +38,8 @@ internal sealed class TransactionProcessor
     /// Never throws. A transaction that makes this blow up would be replayed by every catch-up and every
     /// restart, so an unguarded exception here would wedge the monitor permanently on one bad transaction
     /// — and the metadata it parses is written by whoever built the payment path, not by us.
+    /// A known live example is StaticBit-io/XrplCSharp#148: token amounts outside decimal range make
+    /// BalanceChanges throw, and the payment path is enough to put such amounts in our metadata.
     /// </summary>
     public ProcessingResult Process(IAccountTransaction? transaction)
     {
