@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using Xrpl.AddressCodec;
 
 namespace Xrpl.PaymentGateway;
 
@@ -12,6 +13,12 @@ public sealed class PaymentGatewayOptionsValidator : IValidateOptions<PaymentGat
         if (string.IsNullOrWhiteSpace(options.Address))
         {
             failures.Add($"{nameof(options.Address)} must be the receiving r-address.");
+        }
+        else if (!XrplCodec.IsValidClassicAddress(options.Address))
+        {
+            // Caught here rather than as a subscribe failure at run time. The monitor matches the payment
+            // Destination against this string exactly, so an X-address or a typo would simply never match.
+            failures.Add($"{nameof(options.Address)} \"{options.Address}\" is not a valid classic r-address.");
         }
 
         if (options.Nodes is null || options.Nodes.Count == 0)
@@ -39,6 +46,12 @@ public sealed class PaymentGatewayOptionsValidator : IValidateOptions<PaymentGat
         RequirePositive(options.ReconnectMaxDelay, nameof(options.ReconnectMaxDelay));
         RequirePositive(options.StoreRetryBaseDelay, nameof(options.StoreRetryBaseDelay));
         RequirePositive(options.StoreRetryMaxDelay, nameof(options.StoreRetryMaxDelay));
+        RequirePositive(options.ProductiveSessionThreshold, nameof(options.ProductiveSessionThreshold));
+
+        if (options.ReconcileWindow == 0)
+        {
+            failures.Add($"{nameof(options.ReconcileWindow)} must be greater than zero.");
+        }
 
         if (options.ReconnectBaseDelay > options.ReconnectMaxDelay)
         {

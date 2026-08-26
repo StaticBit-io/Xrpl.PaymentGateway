@@ -112,7 +112,9 @@ internal sealed class XrplPaymentMonitor : BackgroundService
             }
             catch (Exception ex)
             {
-                attempt++;
+                // Same rule as a clean end: a session that ran for hours before dying should not inherit
+                // the backoff earned by earlier failures.
+                attempt = WasSessionProductive(sessionStarted) ? 1 : attempt + 1;
                 _snapshot.SetError(ex.Message);
                 _logger.LogError(ex, "payment monitor session failed");
             }
@@ -533,14 +535,17 @@ internal sealed class XrplPaymentMonitor : BackgroundService
     private async Task ProcessTransactionAsync(IAccountTransaction transaction, CancellationToken cancellationToken)
     {
         ProcessingResult result = _processor.Process(transaction);
-
-        if (result.Kind == ProcessingResultKind.Anomaly)
-        {
-            _snapshot.IncrementAnomaly();
-        }
+        bool isAnomaly = result.Kind == ProcessingResultKind.Anomaly;
 
         if (result.Record is not { } record)
         {
+            // Nothing to deduplicate against, so an anomaly with no record is counted every time it is
+            // replayed. That is the honest reading: it was never stored.
+            if (isAnomaly)
+            {
+                _snapshot.IncrementAnomaly();
+            }
+
             return;
         }
 
@@ -548,10 +553,19 @@ internal sealed class XrplPaymentMonitor : BackgroundService
             .ExecuteAsync(token => _dispatcher.RecordAsync(record, token), "TryAddPayment", cancellationToken)
             .ConfigureAwait(false);
 
-        if (isNew)
+        if (!isNew)
         {
-            await _dispatcher.DeliverAsync(record, cancellationToken).ConfigureAwait(false);
+            // Already stored. Counting the anomaly again on every catch-up would inflate a number the
+            // operator is told to treat as a call to investigate.
+            return;
         }
+
+        if (isAnomaly)
+        {
+            _snapshot.IncrementAnomaly();
+        }
+
+        await _dispatcher.DeliverAsync(record, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task PersistCursorAsync(uint cursor, CancellationToken cancellationToken)

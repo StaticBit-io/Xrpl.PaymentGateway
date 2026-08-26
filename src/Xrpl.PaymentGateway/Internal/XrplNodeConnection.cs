@@ -34,6 +34,7 @@ internal sealed class XrplNodeConnection : IXrplNodeConnection
         _client.OnLedgerClosed += HandleLedgerClosedAsync;
         _client.OnSessionEnded += HandleSessionEndedAsync;
         _client.OnConnected += ResubscribeAsync;
+        _client.OnError += HandleErrorAsync;
     }
 
     public Uri Node { get; }
@@ -134,6 +135,23 @@ internal sealed class XrplNodeConnection : IXrplNodeConnection
     private Task HandleSessionEndedAsync(SessionEndReason reason, string description) =>
         OnSessionEnded?.Invoke($"{reason}: {description}") ?? Task.CompletedTask;
 
+    /// <summary>
+    /// The client reports a frame it could not process through OnError and then keeps the message loop
+    /// running. A frame lost that way may have carried a transaction, and nothing else would ever notice:
+    /// the ledger stream stays contiguous, so the gap check sees nothing and the cursor moves on. Ending
+    /// the session turns the silent loss into a verified catch-up.
+    /// </summary>
+    private Task HandleErrorAsync(string error, string errorMessage, string message, object data)
+    {
+        _logger.LogError(
+            "the client reported a stream error on {Node} ({Error}: {ErrorMessage}); ending the session so catch-up can recollect from the ledger",
+            Node,
+            error,
+            errorMessage);
+
+        return OnSessionEnded?.Invoke($"stream error: {error} {errorMessage}") ?? Task.CompletedTask;
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 1)
@@ -145,6 +163,7 @@ internal sealed class XrplNodeConnection : IXrplNodeConnection
         _client.OnLedgerClosed -= HandleLedgerClosedAsync;
         _client.OnSessionEnded -= HandleSessionEndedAsync;
         _client.OnConnected -= ResubscribeAsync;
+        _client.OnError -= HandleErrorAsync;
 
         try
         {

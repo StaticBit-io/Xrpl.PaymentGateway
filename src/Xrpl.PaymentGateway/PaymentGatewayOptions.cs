@@ -15,7 +15,11 @@ public sealed class PaymentGatewayOptions
     /// </summary>
     public IReadOnlyList<Uri>? CatchUpNodes { get; set; }
 
-    /// <summary>Where to begin when the store has no cursor. Unset means start at the current validated ledger.</summary>
+    /// <summary>
+    /// Where to begin when the store has no cursor. This ledger is treated as already processed, so the
+    /// first catch-up starts at the one after it. Unset means start at the current validated ledger, and a
+    /// value above it is clamped down to it.
+    /// </summary>
     public uint? StartLedgerIndex { get; set; }
 
     /// <summary>

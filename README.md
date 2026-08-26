@@ -73,6 +73,11 @@ Other ways funds can reach an account — `CheckCash`, `EscrowFinish`, `PaymentC
 this library's scope. They cannot be attributed to a buyer by destination tag, so if you accept them you
 need to reconcile them yourself.
 
+**MPT payments are not supported yet.** Amounts are derived from balance changes, and the reader behind
+that walks XRP and trust-line entries only. An MPT payment to the account is not recorded — but it is not
+lost quietly either: a successful payment addressed to you that credits nothing readable is logged as an
+error and raises `AnomalyCount`.
+
 ## What it expects of the receiving account
 
 Use a dedicated account that only receives. Specifically, it must not have `DefaultRipple` enabled and

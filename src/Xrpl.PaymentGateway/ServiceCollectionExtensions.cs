@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Xrpl.PaymentGateway.Abstractions;
 using Xrpl.PaymentGateway.Internal;
@@ -29,7 +30,10 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<IXrplNodeConnectionFactory, XrplNodeConnectionFactory>();
         services.TryAddSingleton<IPaymentGateway, XrplPaymentGateway>();
         services.TryAddSingleton<IPaymentMonitorHealth, PaymentMonitorHealth>();
-        services.AddHostedService<XrplPaymentMonitor>();
+
+        // TryAddEnumerable rather than AddHostedService: calling this twice would otherwise start two
+        // monitors against one account and one cursor.
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, XrplPaymentMonitor>());
 
         return services;
     }

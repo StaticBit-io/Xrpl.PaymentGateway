@@ -403,6 +403,77 @@ public static class TransactionFixtures
     }
     """;
 
+    /// <summary>
+    /// A payment whose trust-line balances are large enough to overflow decimal arithmetic. XRPL token
+    /// values reach ~1e95 while decimal tops out near 7.9e28, and the SDK clamps an unparseable value to
+    /// decimal.MaxValue before subtracting the previous balance — so the subtraction throws. Anyone who can
+    /// route a payment through their own offers can put values like this in our metadata.
+    /// </summary>
+    public const string PoisonousAmounts = """
+    {
+      "type": "transaction",
+      "ledger_index": 111,
+      "hash": "CCCC333333333333333333333333333333333333333333333333333333333333",
+      "validated": true,
+      "meta": {
+        "TransactionIndex": 0,
+        "TransactionResult": "tesSUCCESS",
+        "AffectedNodes": [
+          {
+            "ModifiedNode": {
+              "LedgerEntryType": "RippleState",
+              "LedgerIndex": "FFFF",
+              "FinalFields": {
+                "Balance": { "currency": "USD", "issuer": "rrrrrrrrrrrrrrrrrrrrBZbvji", "value": "9e80" },
+                "LowLimit": { "currency": "USD", "issuer": "rLiooJRSKeiNfRJcDBUhu4rcjQjGLWqa4p", "value": "1e80" },
+                "HighLimit": { "currency": "USD", "issuer": "rXPMxBeefHGxx2K7g5qmmWq3gFsgawkoa", "value": "0" }
+              },
+              "PreviousFields": {
+                "Balance": { "currency": "USD", "issuer": "rrrrrrrrrrrrrrrrrrrrBZbvji", "value": "-9e80" }
+              }
+            }
+          }
+        ]
+      },
+      "tx_json": {
+        "Account": "rnFApzSsKwXyTZtci4Z6nLVL8E1nLZzSBF",
+        "TransactionType": "Payment",
+        "Destination": "rLiooJRSKeiNfRJcDBUhu4rcjQjGLWqa4p",
+        "DestinationTag": 77,
+        "Amount": { "currency": "USD", "issuer": "rXPMxBeefHGxx2K7g5qmmWq3gFsgawkoa", "value": "9e80" },
+        "Fee": "12",
+        "Sequence": 23
+      }
+    }
+    """;
+
+    /// <summary>
+    /// A successful payment to us whose metadata credits nothing our balance reader understands — what an
+    /// MPT payment looks like today, since the reader only walks AccountRoot and RippleState.
+    /// </summary>
+    public const string PaymentToUsWithNoReadableCredit = """
+    {
+      "type": "transaction",
+      "ledger_index": 112,
+      "hash": "DDDD444444444444444444444444444444444444444444444444444444444444",
+      "validated": true,
+      "meta": {
+        "TransactionIndex": 0,
+        "TransactionResult": "tesSUCCESS",
+        "AffectedNodes": []
+      },
+      "tx_json": {
+        "Account": "rnFApzSsKwXyTZtci4Z6nLVL8E1nLZzSBF",
+        "TransactionType": "Payment",
+        "Destination": "rLiooJRSKeiNfRJcDBUhu4rcjQjGLWqa4p",
+        "DestinationTag": 88,
+        "Amount": "1000000",
+        "Fee": "12",
+        "Sequence": 24
+      }
+    }
+    """;
+
     /// <summary>Someone opens a trust line towards us. No balance moved.</summary>
     public const string TrustSetOnly = """
     {

@@ -13,6 +13,12 @@ First release.
   detection, node history verification, and a cursor that freezes rather than skipping an unproven range.
 - Ledger contiguity is enforced: a stream that skips ledger numbers, or a client that dropped frames from
   its bounded inbound queue, ends the session instead of advancing the cursor across unseen ledgers.
+- Transaction analysis cannot throw. Metadata is written by whoever built the payment path, and an
+  exception on a transaction every catch-up replays would wedge the monitor permanently; such a
+  transaction is reported as an anomaly instead.
+- Every way a payment addressed to the account can fail to produce a record — an unreadable body, an
+  amount the balance reader does not understand — is logged as an error and counted, never skipped
+  quietly.
 - Amounts computed from transaction metadata balance changes, so partial payments record what arrived.
 - `IPaymentMonitorHealth` for liveness reporting and reconciliation from any scheduler.
 - `InMemoryPaymentStore` reference implementation and a sample API.

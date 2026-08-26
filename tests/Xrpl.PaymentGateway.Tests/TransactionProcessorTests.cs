@@ -1,4 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
+using Xrpl.Models.Subscriptions;
+using Xrpl.Models.Transactions;
 using Xrpl.PaymentGateway.Abstractions;
 using Xrpl.PaymentGateway.Internal;
 using Xrpl.PaymentGateway.Tests.Fakes;
@@ -151,5 +153,48 @@ public class TransactionProcessorTests
         ProcessingResult result = CreateProcessor().Process(null!);
 
         Assert.Equal(ProcessingResultKind.Skipped, result.Kind);
+    }
+
+    [Fact]
+    public void AmountsThatOverflowDecimalArithmeticAreReportedRatherThanThrown()
+    {
+        // An unguarded exception here would be replayed by every catch-up and every restart, wedging the
+        // monitor on one transaction forever.
+        ProcessingResult result = Process(TransactionFixtures.PoisonousAmounts);
+
+        Assert.Equal(ProcessingResultKind.Anomaly, result.Kind);
+        Assert.Null(result.Record);
+        Assert.NotNull(result.Reason);
+    }
+
+    [Fact]
+    public void ASuccessfulPaymentToUsThatCreditsNothingReadableIsAnAnomalyNotASilentSkip()
+    {
+        ProcessingResult result = Process(TransactionFixtures.PaymentToUsWithNoReadableCredit);
+
+        Assert.Equal(ProcessingResultKind.Anomaly, result.Kind);
+        Assert.Null(result.Record);
+        Assert.Contains("not recorded", result.Reason);
+    }
+
+    [Fact]
+    public void APaymentWhoseBodyCouldNotBeReadIsAnAnomalyNotSomebodyElsesPayment()
+    {
+        // What the SDK's converter hands back when the transaction body throws a JsonException: the right
+        // shape, every field at its default. Skipping it as "not addressed to us" would lose a real payment.
+        TransactionStream stream = new TransactionStream
+        {
+            Validated = true,
+            Hash = "EEEE555555555555555555555555555555555555555555555555555555555555",
+            LedgerIndex = 113,
+            Meta = new Meta { TransactionResult = "tesSUCCESS", AffectedNodes = new List<AffectedNode>() },
+            Transaction = new PaymentResponse { Account = TransactionFixtures.Sender },
+        };
+
+        ProcessingResult result = CreateProcessor().Process(stream);
+
+        Assert.Equal(ProcessingResultKind.Anomaly, result.Kind);
+        Assert.Null(result.Record);
+        Assert.Contains("Destination", result.Reason);
     }
 }

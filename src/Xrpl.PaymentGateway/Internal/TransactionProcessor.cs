@@ -34,7 +34,26 @@ internal sealed class TransactionProcessor
         _logger = logger;
     }
 
+    /// <summary>
+    /// Never throws. A transaction that makes this blow up would be replayed by every catch-up and every
+    /// restart, so an unguarded exception here would wedge the monitor permanently on one bad transaction
+    /// — and the metadata it parses is written by whoever built the payment path, not by us.
+    /// </summary>
     public ProcessingResult Process(IAccountTransaction? transaction)
+    {
+        try
+        {
+            return Evaluate(transaction);
+        }
+        catch (Exception ex)
+        {
+            string reason = $"transaction {transaction?.Hash ?? "(no hash)"} could not be analysed: {ex.Message}";
+            _logger.LogError(ex, "payment anomaly: {Reason}", reason);
+            return ProcessingResult.Anomaly(null, reason);
+        }
+    }
+
+    private ProcessingResult Evaluate(IAccountTransaction? transaction)
     {
         if (transaction is null)
         {
@@ -83,6 +102,16 @@ internal sealed class TransactionProcessor
             return ProcessingResult.Skip($"{tx.TransactionType} is not a Payment");
         }
 
+        if (string.IsNullOrEmpty(payment.Destination))
+        {
+            // Every on-ledger Payment carries a Destination. An empty one means the SDK's converter hit a
+            // JsonException and handed back a blank object, which would otherwise be skipped below as
+            // "somebody else's payment" — losing a real one silently.
+            string reason = $"payment {transaction.Hash} has no Destination; its body could not be read and it was not recorded";
+            _logger.LogError("payment anomaly: {Reason}", reason);
+            return ProcessingResult.Anomaly(null, reason);
+        }
+
         // Only payments addressed to us count. A payment that merely ripples through the account on its way
         // somewhere else also moves our balances, but none of it is ours to keep.
         if (!string.Equals(payment.Destination, _receivingAddress, StringComparison.Ordinal))
@@ -104,7 +133,7 @@ internal sealed class TransactionProcessor
         Dictionary<string, List<Currency>> changes = BalanceChanges.GetBalanceChanges(meta);
         if (!changes.TryGetValue(_receivingAddress, out List<Currency>? ours) || ours.Count == 0)
         {
-            return ProcessingResult.Skip("no balance change for the receiving account");
+            return NothingCredited(transaction, "the metadata shows no balance change for the receiving account");
         }
 
         List<(Currency Currency, decimal Value)> credits = new List<(Currency, decimal)>();
@@ -124,7 +153,7 @@ internal sealed class TransactionProcessor
 
         if (credits.Count == 0)
         {
-            return ProcessingResult.Skip("no positive balance change");
+            return NothingCredited(transaction, "the metadata shows no credit to the receiving account");
         }
 
         (Currency currency, decimal value) = credits.OrderByDescending(candidate => candidate.Value).First();
@@ -162,6 +191,19 @@ internal sealed class TransactionProcessor
         }
 
         return ProcessingResult.Recorded(record);
+    }
+
+    /// <summary>
+    /// A successful Payment addressed to us always delivered something, so finding no credit means the
+    /// amount was in a form the balance-change reader does not understand — MPT issuances, which it does
+    /// not walk at all — or the metadata failed to parse. Either way a buyer's money went unrecorded, and
+    /// that must not pass quietly.
+    /// </summary>
+    private ProcessingResult NothingCredited(IAccountTransaction transaction, string detail)
+    {
+        string reason = $"payment {transaction.Hash} is addressed to the receiving account and succeeded, but {detail}; it was not recorded";
+        _logger.LogError("payment anomaly: {Reason}", reason);
+        return ProcessingResult.Anomaly(null, reason);
     }
 
     /// <summary>XRP deltas arrive in drops on <c>ValueAsNumber</c>; <c>ValueAsXrp</c> is the human amount.</summary>
