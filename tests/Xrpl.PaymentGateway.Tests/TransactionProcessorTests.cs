@@ -156,15 +156,18 @@ public class TransactionProcessorTests
     }
 
     [Fact]
-    public void AmountsThatOverflowDecimalArithmeticAreReportedRatherThanThrown()
+    public void AnAmountBeyondWhatDecimalHoldsIsReportedRatherThanThrown()
     {
-        // An unguarded exception here would be replayed by every catch-up and every restart, wedging the
-        // monitor on one transaction forever.
+        // The SDK raises AmountOutOfRangeException here by design: XRPL issued currency reaches ~1e96 and
+        // decimal stops near 7.9e28. An unguarded call would be replayed by every catch-up and every
+        // restart, wedging the monitor on one transaction forever.
         ProcessingResult result = Process(TransactionFixtures.PoisonousAmounts);
 
         Assert.Equal(ProcessingResultKind.Anomaly, result.Kind);
         Assert.Null(result.Record);
-        Assert.NotNull(result.Reason);
+
+        // The offending amount reaches the operator, which only happens through the typed catch.
+        Assert.Contains("9e80", result.Reason);
     }
 
     [Fact]

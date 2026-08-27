@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Xrpl.Client.Exceptions;
 using Xrpl.Models;
 using Xrpl.Models.Common;
 using Xrpl.Models.Methods;
@@ -38,14 +39,27 @@ internal sealed class TransactionProcessor
     /// Never throws. A transaction that makes this blow up would be replayed by every catch-up and every
     /// restart, so an unguarded exception here would wedge the monitor permanently on one bad transaction
     /// — and the metadata it parses is written by whoever built the payment path, not by us.
-    /// A known live example is StaticBit-io/XrplCSharp#148: token amounts outside decimal range make
-    /// BalanceChanges throw, and the payment path is enough to put such amounts in our metadata.
     /// </summary>
+    /// <remarks>
+    /// The amount case is not hypothetical and is not a defect being waited out: XRPL issued currency
+    /// reaches roughly 1e96 while <see cref="decimal"/> stops near 7.9e28, so
+    /// <see cref="BalanceChanges.GetBalanceChanges"/> raises <see cref="AmountOutOfRangeException"/> by
+    /// design rather than answering with a number that is wrong by orders of magnitude. Routing a payment
+    /// through an offer in one's own token is enough to put such a value in our metadata.
+    /// </remarks>
     public ProcessingResult Process(IAccountTransaction? transaction)
     {
         try
         {
             return Evaluate(transaction);
+        }
+        catch (AmountOutOfRangeException ex)
+        {
+            // Reported separately because this one carries the amount the node sent, and that figure is
+            // what an operator needs to tell a token with an absurd supply from a genuine problem.
+            string reason = $"transaction {transaction?.Hash ?? "(no hash)"} carries the amount {ex.Value}, which is beyond what this library can represent; it was not recorded";
+            _logger.LogError(ex, "payment anomaly: {Reason}", reason);
+            return ProcessingResult.Anomaly(null, reason);
         }
         catch (Exception ex)
         {
