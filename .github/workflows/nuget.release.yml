@@ -1,0 +1,58 @@
+name: publish packages
+
+# Pushing to release publishes to nuget.org, and that cannot be undone: a version number is spent the
+# moment it is accepted, deletion is not offered, and unlisting only hides it. Promote deliberately.
+on:
+  push:
+    branches: [release]
+
+permissions:
+  contents: read
+  packages: write
+  # Trusted Publishing. nuget.org API keys stop working on 2026-11-01, and a policy there is bound to this
+  # repository and this workflow file by name — renaming the file breaks publishing.
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - run: dotnet restore
+      - run: dotnet build --no-restore --configuration Release
+
+      # Publishing something whose tests were never run is how a broken package reaches consumers.
+      - name: unit tests
+        run: dotnet run --project tests/Xrpl.PaymentGateway.Tests --no-build -c Release -- -trait- "Category=Integration"
+
+      - name: pack
+        run: |
+          dotnet pack src/Xrpl.PaymentGateway.Abstractions/Xrpl.PaymentGateway.Abstractions.csproj -c Release --no-build
+          dotnet pack src/Xrpl.PaymentGateway/Xrpl.PaymentGateway.csproj -c Release --no-build
+          dotnet pack src/Xrpl.PaymentGateway.Postgres/Xrpl.PaymentGateway.Postgres.csproj -c Release --no-build
+
+      # GitHub Packages first: it takes a re-push of the same version, so a failure here costs nothing.
+      - name: publish to GitHub Packages
+        run: >
+          dotnet nuget push "**/*.nupkg" --skip-duplicate
+          --source https://nuget.pkg.github.com/StaticBit-io/index.json
+          -k ${{ secrets.GITHUB_TOKEN }}
+
+      - name: authenticate with nuget.org
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
+      - name: publish to nuget.org
+        run: >
+          dotnet nuget push "**/*.nupkg" --skip-duplicate
+          -s https://api.nuget.org/v3/index.json
+          -k ${{ steps.nuget-login.outputs.NUGET_API_KEY }}

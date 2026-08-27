@@ -7,7 +7,7 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
     <Authors>StaticBit</Authors>
     <Company>StaticBit</Company>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/StaticBit-io/Xrpl.PaymentGateway</RepositoryUrl>
     <PackageVersion>0.1.0</PackageVersion>
   </PropertyGroup>
