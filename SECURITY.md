@@ -11,7 +11,7 @@ public network makes a report far easier to act on.
 
 ## Supported versions
 
-The library has not had a stable release yet. Until it does, fixes land on the latest version only.
+Fixes land on the latest released version. `1.0.0` is the current one.
 
 ## What is in scope
 

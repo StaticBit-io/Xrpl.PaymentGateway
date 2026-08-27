@@ -39,9 +39,10 @@ jobs:
           dotnet pack src/Xrpl.PaymentGateway.Postgres/Xrpl.PaymentGateway.Postgres.csproj -c Release --no-build
 
       # GitHub Packages first: it takes a re-push of the same version, so a failure here costs nothing.
+      # GitHub Packages has no symbol server, so the .snupkg goes to nuget.org only.
       - name: publish to GitHub Packages
         run: >
-          dotnet nuget push "**/*.nupkg" --skip-duplicate
+          dotnet nuget push "**/*.nupkg" --skip-duplicate --no-symbols
           --source https://nuget.pkg.github.com/StaticBit-io/index.json
           -k ${{ secrets.GITHUB_TOKEN }}
 

@@ -53,7 +53,7 @@ builder.Services.AddXrplPaymentGateway(options =>
 ```
 
 Every setting, with its default and what happens when it is wrong, is in the
-[configuration reference](docs/configuration.md).
+[configuration reference](https://github.com/StaticBit-io/Xrpl.PaymentGateway/blob/release/docs/configuration.md).
 
 Issue instructions when a buyer reaches checkout:
 
@@ -184,7 +184,7 @@ The stand publishes the same ports as the XrplCSharp CI stand, so only one of th
 If a healthy standalone node is already listening there, the tests use it and you can skip the compose step
 entirely; when nothing is listening, they skip themselves rather than fail.
 
-[CONTRIBUTING.md](CONTRIBUTING.md) has the rest: test filters, how to prove a new payment store against the
+[CONTRIBUTING.md](https://github.com/StaticBit-io/Xrpl.PaymentGateway/blob/release/CONTRIBUTING.md) has the rest: test filters, how to prove a new payment store against the
 shared contract, code style, and the release process.
 
 ## Sample

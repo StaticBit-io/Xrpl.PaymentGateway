@@ -7,11 +7,28 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
     <Authors>StaticBit</Authors>
     <Company>StaticBit</Company>
+    <Copyright>Copyright (c) StaticBit</Copyright>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/StaticBit-io/Xrpl.PaymentGateway</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
     <PackageProjectUrl>https://github.com/StaticBit-io/Xrpl.PaymentGateway</PackageProjectUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageVersion>0.1.0</PackageVersion>
+    <PackageTags>xrpl;xrp;ripple;payments;payment-gateway;blockchain;destination-tag</PackageTags>
+    <PackageVersion>1.0.0</PackageVersion>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- SourceLink ships in the .NET SDK, so stepping into these packages in a debugger needs no extra
+         PackageReference: only the repository URL in the assembly and a symbol package to publish. -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(GITHUB_ACTIONS)' == 'true'">
+    <!-- Normalizes paths compiled into the assembly, so a local build and the published one agree. -->
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
   </PropertyGroup>
 
   <ItemGroup>
