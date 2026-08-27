@@ -249,6 +249,60 @@ public class MonitorCursorIntegrityTests
     }
 
     [Fact]
+    public async Task AGapStaysFrozenEvenWhenTheNextNodeSitsBelowTheCursor()
+    {
+        InMemoryPaymentStore inner = new InMemoryPaymentStore();
+        await using Harness harness = new Harness(store: inner);
+        await inner.SetLastProcessedLedgerAsync(100, TestContext.Current.CancellationToken);
+
+        // Nobody can prove 101-900, so the first session freezes the cursor.
+        ConfigureNodes(harness, validated: 900, completeLedgers: "800-900");
+        await harness.StartAsync();
+        await TestWait.UntilAsync(
+            () => harness.Snapshot.Read().State == PaymentMonitorState.HistoryGap, "the monitor to report a history gap");
+
+        // The next session lands on a node that sits below the cursor, so no catch-up runs at all. Skipping
+        // one proves nothing, so the gap must survive rather than being cleared by the absence of work.
+        ConfigureNodes(harness, validated: 50, completeLedgers: "1-50");
+        await harness.Factory.For(NodeA).EndSessionAsync("socket closed");
+
+        await TestWait.UntilAsync(
+            () => harness.Factory.For(NodeB).SubscribedAccount is not null, "the monitor to open a fresh session");
+        await Task.Delay(200, TestContext.Current.CancellationToken);
+
+        Assert.Equal(PaymentMonitorState.HistoryGap, harness.Snapshot.Read().State);
+        Assert.Equal(100u, await inner.GetLastProcessedLedgerAsync(TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task OverflowingTheStreamBufferEndsTheSessionRatherThanDroppingEvents()
+    {
+        ScriptedPaymentStore store = new ScriptedPaymentStore(new InMemoryPaymentStore());
+        TaskCompletionSource cursorGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        store.HoldCursorReads = cursorGate;
+
+        await using Harness harness = new Harness(options => options.StreamBufferCapacity = 2, store: store);
+        ConfigureNodes(harness, validated: 100);
+
+        await harness.StartAsync();
+        await TestWait.UntilAsync(
+            () => harness.Factory.For(NodeA).SubscribedAccount is not null, "the first session to subscribe");
+
+        // The monitor is parked reading the cursor, so nothing is draining the channel yet. More events
+        // than the buffer holds must not be silently discarded.
+        for (int i = 0; i < 8; i++)
+        {
+            await harness.Factory.For(NodeA).PushLedgerAsync((ulong)(101 + i));
+        }
+
+        cursorGate.SetResult();
+
+        await TestWait.UntilAsync(
+            () => harness.Factory.For(NodeB).SubscribedAccount is not null,
+            "the monitor to abandon the session whose buffer overflowed");
+    }
+
+    [Fact]
     public async Task RecoveringFromANetworkStallReturnsToStreamingRatherThanStickingStalled()
     {
         await using Harness harness = new Harness(options => options.LedgerStallTimeout = TimeSpan.FromMilliseconds(100));

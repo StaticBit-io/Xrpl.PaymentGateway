@@ -22,6 +22,12 @@ public sealed class ScriptedPaymentStore : IPaymentStore
     public TaskCompletionSource? HoldUnhandledReads { get; set; }
 
     /// <summary>
+    /// When set, reads of the ledger cursor wait on it. That stalls the monitor before it starts draining
+    /// its event channel, which is how a test fills the buffer without racing the reader.
+    /// </summary>
+    public TaskCompletionSource? HoldCursorReads { get; set; }
+
+    /// <summary>
     /// Completes once a read of unhandled payments has actually started. A test that wants a call to be
     /// genuinely in flight waits on this rather than on the caller's task not being finished yet, which
     /// is true immediately and proves nothing.
@@ -57,8 +63,15 @@ public sealed class ScriptedPaymentStore : IPaymentStore
         return await _inner.GetUnhandledPaymentsAsync(limit, cancellationToken);
     }
 
-    public Task<uint?> GetLastProcessedLedgerAsync(CancellationToken cancellationToken) =>
-        _inner.GetLastProcessedLedgerAsync(cancellationToken);
+    public async Task<uint?> GetLastProcessedLedgerAsync(CancellationToken cancellationToken)
+    {
+        if (HoldCursorReads is { } gate)
+        {
+            await gate.Task.WaitAsync(cancellationToken);
+        }
+
+        return await _inner.GetLastProcessedLedgerAsync(cancellationToken);
+    }
 
     public Task SetLastProcessedLedgerAsync(uint ledgerIndex, CancellationToken cancellationToken) =>
         _inner.SetLastProcessedLedgerAsync(ledgerIndex, cancellationToken);

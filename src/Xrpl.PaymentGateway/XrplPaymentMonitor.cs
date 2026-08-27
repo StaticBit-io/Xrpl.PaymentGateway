@@ -34,6 +34,7 @@ internal sealed class XrplPaymentMonitor : BackgroundService
     private readonly PaymentDispatcher _dispatcher;
     private readonly CatchUpRunner _catchUp;
     private readonly StoreRetryPolicy _storeRetry;
+    private readonly ReconnectBackoff _backoff;
 
     private uint _persistedCursor;
 
@@ -65,6 +66,7 @@ internal sealed class XrplPaymentMonitor : BackgroundService
         _processor = new TransactionProcessor(_options.Address, timeProvider, logger);
         _dispatcher = new PaymentDispatcher(store, handler, logger);
         _catchUp = new CatchUpRunner(logger);
+        _backoff = new ReconnectBackoff(_options.ReconnectBaseDelay, _options.ReconnectMaxDelay);
         _storeRetry = new StoreRetryPolicy(
             _options.StoreRetryBaseDelay,
             _options.StoreRetryMaxDelay,
@@ -87,8 +89,6 @@ internal sealed class XrplPaymentMonitor : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        int attempt = 0;
-
         while (!stoppingToken.IsCancellationRequested)
         {
             DateTimeOffset sessionStarted = _timeProvider.GetUtcNow();
@@ -96,7 +96,7 @@ internal sealed class XrplPaymentMonitor : BackgroundService
             try
             {
                 await RunSessionAsync(stoppingToken).ConfigureAwait(false);
-                attempt = WasSessionProductive(sessionStarted) ? 0 : attempt + 1;
+                RecordSessionOutcome(sessionStarted);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -105,16 +105,11 @@ internal sealed class XrplPaymentMonitor : BackgroundService
             catch (SessionEndedException ex)
             {
                 _logger.LogWarning("node session ended: {Reason}", ex.Message);
-
-                // Only a session that actually ran resets the backoff. A node that accepts the socket and
-                // drops it immediately would otherwise be retried forever at the base delay.
-                attempt = WasSessionProductive(sessionStarted) ? 0 : attempt + 1;
+                RecordSessionOutcome(sessionStarted);
             }
             catch (Exception ex)
             {
-                // Same rule as a clean end: a session that ran for hours before dying should not inherit
-                // the backoff earned by earlier failures.
-                attempt = WasSessionProductive(sessionStarted) ? 1 : attempt + 1;
+                RecordSessionOutcome(sessionStarted, failed: true);
                 _snapshot.SetError(ex.Message);
                 _logger.LogError(ex, "payment monitor session failed");
             }
@@ -128,7 +123,7 @@ internal sealed class XrplPaymentMonitor : BackgroundService
 
             try
             {
-                await Task.Delay(ReconnectDelay(attempt), _timeProvider, stoppingToken).ConfigureAwait(false);
+                await Task.Delay(_backoff.NextDelay(), _timeProvider, stoppingToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -245,8 +240,11 @@ internal sealed class XrplPaymentMonitor : BackgroundService
 
         if (cursor >= validated)
         {
-            _unprovenFromLedger = null;
-            _snapshot.SetState(PaymentMonitorState.Streaming);
+            // Nothing to replay: this node is at or behind the boundary we have already proven. Note what
+            // is deliberately *not* done here — an open gap is not cleared. Skipping a catch-up proves
+            // nothing, and only a catch-up that actually searched the range may lift the freeze.
+            _snapshot.SetState(
+                _unprovenFromLedger is null ? PaymentMonitorState.Streaming : PaymentMonitorState.HistoryGap);
             return validated;
         }
 
@@ -582,23 +580,25 @@ internal sealed class XrplPaymentMonitor : BackgroundService
         _snapshot.SetCursor(cursor);
     }
 
-    /// <summary>A session that lived long enough to be doing its job, rather than failing on arrival.</summary>
-    private bool WasSessionProductive(DateTimeOffset startedAt) =>
-        _timeProvider.GetUtcNow() - startedAt >= _options.ProductiveSessionThreshold;
-
-    private TimeSpan ReconnectDelay(int attempt)
+    /// <summary>
+    /// A session that lived long enough to be doing its job clears the escalation; one that failed on
+    /// arrival adds to it. <paramref name="failed"/> covers a session that died by exception after
+    /// working for a while — that is worth one step of backoff, not the whole history of earlier failures.
+    /// </summary>
+    private void RecordSessionOutcome(DateTimeOffset startedAt, bool failed = false)
     {
-        if (attempt <= 0)
+        if (_timeProvider.GetUtcNow() - startedAt >= _options.ProductiveSessionThreshold)
         {
-            return _options.ReconnectBaseDelay;
+            _backoff.RecordProductiveSession();
+
+            if (failed)
+            {
+                _backoff.RecordFailure();
+            }
+
+            return;
         }
 
-        double exponent = Math.Min(attempt - 1, 16);
-        double milliseconds = Math.Min(
-            _options.ReconnectBaseDelay.TotalMilliseconds * Math.Pow(2, exponent),
-            _options.ReconnectMaxDelay.TotalMilliseconds);
-        double jittered = milliseconds * (0.75 + (Random.Shared.NextDouble() * 0.5));
-
-        return TimeSpan.FromMilliseconds(Math.Min(jittered, _options.ReconnectMaxDelay.TotalMilliseconds));
+        _backoff.RecordFailure();
     }
 }
