@@ -94,6 +94,19 @@ that walks XRP and trust-line entries only. An MPT payment to the account is not
 lost quietly either: a successful payment addressed to you that credits nothing readable is logged as an
 error and raises `AnomalyCount`.
 
+## What it does not do
+
+Deliberately out of scope, so that what is in scope can be relied on:
+
+- **Outgoing payments, refunds, invoicing, fiat conversion.** This receives and records; everything after
+  that is the host's.
+- **More than one receiving account per instance.** Run an instance per account — the ledger cursor and
+  the tag counter belong to one account each.
+- **More than one monitor per account.** A second instance produces no duplicate records, because writes
+  are keyed by transaction hash, but it is not a supported configuration.
+- **MPT amounts.** See above: not recorded, but not lost quietly either.
+- **A scheduler.** `CheckAsync` and `ReconcileAsync` are called by whatever the host already runs.
+
 ## What it expects of the receiving account
 
 Use a dedicated account that only receives. Specifically, it must not have `DefaultRipple` enabled and
