@@ -8,11 +8,12 @@ gateway writes through it, whether that is PostgreSQL, a file, or something else
 
 ## Install
 
-```
+```bash
 dotnet add package Xrpl.PaymentGateway
 ```
 
-Implement storage against `Xrpl.PaymentGateway.Abstractions`, which has no dependency on the XRPL SDK.
+Add `Xrpl.PaymentGateway.Postgres` as well if you want the PostgreSQL store. A project that only implements
+storage takes `Xrpl.PaymentGateway.Abstractions` instead, which has no dependency on the XRPL SDK.
 
 ## Choosing a store
 
@@ -33,7 +34,11 @@ concurrency and restart cases. Deriving from it is how a new store proves itself
 ## Use
 
 ```csharp
-builder.Services.AddSingleton<IPaymentStore, MyPostgresPaymentStore>();
+// Any IPaymentStore will do. This one is from Xrpl.PaymentGateway.Postgres.
+PostgresPaymentStore store = new PostgresPaymentStore(connectionString);
+await store.EnsureSchemaAsync();
+
+builder.Services.AddSingleton<IPaymentStore>(store);
 builder.Services.AddSingleton<IPaymentReceivedHandler, MyOrderActivator>();
 
 builder.Services.AddXrplPaymentGateway(options =>
@@ -46,6 +51,9 @@ builder.Services.AddXrplPaymentGateway(options =>
     ];
 });
 ```
+
+Every setting, with its default and what happens when it is wrong, is in the
+[configuration reference](docs/configuration.md).
 
 Issue instructions when a buyer reaches checkout:
 
@@ -152,7 +160,7 @@ not as progress.
 The test project is an executable, not a `dotnet test` target: xunit.v3 runs on Microsoft Testing Platform,
 and the .NET 10 SDK's `dotnet test` still routes through VSTest, which refuses to run it.
 
-```
+```bash
 dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -trait- "Category=Integration"
 ```
 
@@ -166,7 +174,7 @@ it setup. The two issuers exist because a trust line's sides are ordered by comp
 which side the receiving account lands on changes the shape of the metadata a payment produces; one issuer
 would test whichever case the random addresses happened to give.
 
-```
+```bash
 docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml up -d
 dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -trait "Category=Integration"
 docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml down
@@ -176,13 +184,16 @@ The stand publishes the same ports as the XrplCSharp CI stand, so only one of th
 If a healthy standalone node is already listening there, the tests use it and you can skip the compose step
 entirely; when nothing is listening, they skip themselves rather than fail.
 
+[CONTRIBUTING.md](CONTRIBUTING.md) has the rest: test filters, how to prove a new payment store against the
+shared contract, code style, and the release process.
+
 ## Sample
 
 `samples/Xrpl.PaymentGateway.SampleApi` is a minimal API with a checkout page in front of it — the whole
 surface, end to end, in something you can click. No build step and no package manager: the page is three
 static files, so `dotnet run` is the entire toolchain.
 
-```
+```bash
 docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml up -d
 Xrpl__Address=rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh dotnet run --project samples/Xrpl.PaymentGateway.SampleApi
 ```
