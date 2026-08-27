@@ -4,6 +4,7 @@
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/Xrpl.PaymentGateway.Abstractions/Xrpl.PaymentGateway.Abstractions.csproj" />
+    <Project Path="src/Xrpl.PaymentGateway.Postgres/Xrpl.PaymentGateway.Postgres.csproj" />
     <Project Path="src/Xrpl.PaymentGateway/Xrpl.PaymentGateway.csproj" />
   </Folder>
   <Folder Name="/tests/">

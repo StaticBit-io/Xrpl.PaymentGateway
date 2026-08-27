@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
+    <PackageId>Xrpl.PaymentGateway.Postgres</PackageId>
+    <Description>A PostgreSQL IPaymentStore for Xrpl.PaymentGateway: durable payment records, atomic destination tag allocation and the ledger cursor.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Xrpl.PaymentGateway.Abstractions\Xrpl.PaymentGateway.Abstractions.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Npgsql" Version="9.0.5" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Xrpl.PaymentGateway.Tests" />
+  </ItemGroup>
+</Project>

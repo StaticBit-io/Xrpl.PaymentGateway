@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Xrpl.PaymentGateway\Xrpl.PaymentGateway.csproj" />
+    <ProjectReference Include="..\..\src\Xrpl.PaymentGateway.Postgres\Xrpl.PaymentGateway.Postgres.csproj" />
   </ItemGroup>
 
   <ItemGroup>

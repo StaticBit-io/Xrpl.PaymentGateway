@@ -14,6 +14,22 @@ dotnet add package Xrpl.PaymentGateway
 
 Implement storage against `Xrpl.PaymentGateway.Abstractions`, which has no dependency on the XRPL SDK.
 
+## Choosing a store
+
+Where payments are recorded is your decision, and there are three ways to make it:
+
+| Store | Where it lives | Use it when |
+|---|---|---|
+| `PostgresPaymentStore` | `Xrpl.PaymentGateway.Postgres` | You have a database. Tag allocation and hash uniqueness are enforced by Postgres, so they hold across processes and restarts. Call `EnsureSchemaAsync` on start; it is idempotent and is the only migration there is. |
+| `FilePaymentStore` | `Xrpl.PaymentGateway` | You want no database. A single JSON file, rewritten atomically per write. One process only — which is the only supported way to run the monitor anyway. |
+| `InMemoryPaymentStore` | `Xrpl.PaymentGateway` | Tests and demos. Everything is lost on restart, so the gateway would re-scan from the current ledger and miss whatever arrived while it was down. |
+
+Writing your own is the fourth way, and the interface is small. Two requirements are not negotiable:
+`GetOrAssignTagAsync` must be atomic, and `TryAddPaymentAsync` must enforce uniqueness of the transaction
+hash and return false rather than throw on a duplicate. Both are easy to state and easy to get wrong, so
+the test suite has a `PaymentStoreContract` class that every shipped store derives from — including the
+concurrency and restart cases. Deriving from it is how a new store proves itself.
+
 ## Use
 
 ```csharp
@@ -127,7 +143,9 @@ and the .NET 10 SDK's `dotnet test` still routes through VSTest, which refuses t
 dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -trait- "Category=Integration"
 ```
 
-Integration tests need a standalone node on `ws://localhost:6006`:
+Integration tests need the stand: a standalone node on `ws://localhost:6006` and, for the Postgres
+store's contract tests, a database on `localhost:55432`. Both come up together, and each test skips itself
+rather than failing when its dependency is missing:
 
 ```
 docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml up -d

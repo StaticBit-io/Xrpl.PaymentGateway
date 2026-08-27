@@ -4,14 +4,24 @@ using Xrpl.PaymentGateway.SampleApi;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
-// The store is the host's choice. This sample keeps everything in memory; swapping in Postgres or a
-// file is a matter of implementing IPaymentStore, with no change to anything below.
-// Note that tag allocation belongs to the store, so the store is where the first tag is configured —
+// The store is the host's choice, and this sample makes that concrete: set Xrpl:StorePath and payments
+// survive a restart in a plain file; leave it unset and everything lives in memory. A database is the
+// same swap — implement IPaymentStore, or take Xrpl.PaymentGateway.Postgres — with no change below.
+// Note that tag allocation belongs to the store, so the store is where the first tag is configured;
 // PaymentGatewayOptions.FirstDestinationTag is the value to hand it, not a setting the library applies
 // behind your back.
 uint firstTag = builder.Configuration.GetValue<uint?>("Xrpl:FirstDestinationTag") ?? 1;
-builder.Services.AddSingleton<InMemoryPaymentStore>(_ => new InMemoryPaymentStore(firstTag));
-builder.Services.AddSingleton<IPaymentStore>(services => services.GetRequiredService<InMemoryPaymentStore>());
+string? storePath = builder.Configuration["Xrpl:StorePath"];
+
+if (string.IsNullOrWhiteSpace(storePath))
+{
+    builder.Services.AddSingleton<InMemoryPaymentStore>(_ => new InMemoryPaymentStore(firstTag));
+    builder.Services.AddSingleton<IPaymentStore>(services => services.GetRequiredService<InMemoryPaymentStore>());
+}
+else
+{
+    builder.Services.AddSingleton<IPaymentStore>(_ => new FilePaymentStore(storePath, firstTag));
+}
 
 builder.Services.AddSingleton<SamplePaymentHandler>();
 builder.Services.AddSingleton<IPaymentReceivedHandler>(services => services.GetRequiredService<SamplePaymentHandler>());
@@ -39,7 +49,11 @@ app.MapPost("/checkout/{buyerId}", async (
 
 app.MapGet("/payments", (SamplePaymentHandler handler) => Results.Ok(handler.Delivered));
 
-app.MapGet("/recorded", (InMemoryPaymentStore store) => Results.Ok(store.Snapshot()));
+// Reading back everything ever recorded is not part of IPaymentStore — the gateway never needs it — so
+// this endpoint only exists when the sample is running on the in-memory store that offers a snapshot.
+app.MapGet("/recorded", (IPaymentStore store) => store is InMemoryPaymentStore inMemory
+    ? Results.Ok(inMemory.Snapshot())
+    : Results.NotFound(new { message = "the configured store does not expose a snapshot" }));
 
 app.MapGet("/health", async (IPaymentMonitorHealth health, CancellationToken cancellationToken) =>
 {

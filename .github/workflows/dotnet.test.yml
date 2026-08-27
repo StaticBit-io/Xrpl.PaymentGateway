@@ -34,7 +34,7 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-      - name: start standalone rippled
+      - name: start the standalone ledger and the database
         run: docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml up -d
       - name: wait for the node
         run: |
@@ -48,6 +48,18 @@ jobs:
           done
           echo "node did not come up in time"
           docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml logs
+          exit 1
+      - name: wait for postgres
+        run: |
+          for i in $(seq 1 30); do
+            if docker exec xrplpg-postgres pg_isready -U xrplpg > /dev/null 2>&1; then
+              echo "postgres is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "postgres did not come up in time"
+          docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml logs postgres
           exit 1
       - run: dotnet run --project tests/Xrpl.PaymentGateway.Tests -c Release -- -trait "Category=Integration"
       - if: always()

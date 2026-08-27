@@ -33,3 +33,20 @@ services:
           sleep 4
         done
     restart: unless-stopped
+
+  # The Postgres store's contract tests run against this. A throwaway database: every test creates its
+  # own schema and drops it, so nothing needs to persist between runs.
+  postgres:
+    image: postgres:17-alpine
+    container_name: xrplpg-postgres
+    environment:
+      POSTGRES_PASSWORD: xrplpg
+      POSTGRES_USER: xrplpg
+      POSTGRES_DB: xrplpg
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xrplpg"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
