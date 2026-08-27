@@ -9,6 +9,7 @@
     <Company>StaticBit</Company>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/StaticBit-io/Xrpl.PaymentGateway</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/StaticBit-io/Xrpl.PaymentGateway</PackageProjectUrl>
     <PackageVersion>0.1.0</PackageVersion>
   </PropertyGroup>
 </Project>
