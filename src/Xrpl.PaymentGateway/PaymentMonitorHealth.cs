@@ -60,6 +60,11 @@ internal sealed class PaymentMonitorHealth : IPaymentMonitorHealth
                 .ConfigureAwait(false);
             unhandled = pending.Count;
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // A cancelled health check is the caller giving up, not the store being unreachable.
+            throw;
+        }
         catch (Exception ex)
         {
             // A health endpoint that could not reach the store must not answer "healthy" just because the
@@ -136,6 +141,11 @@ internal sealed class PaymentMonitorHealth : IPaymentMonitorHealth
             pending = await _store
                 .GetUnhandledPaymentsAsync(_options.HealthUnhandledSampleSize, cancellationToken)
                 .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // A cancelled run is the caller giving up, not the store failing.
+            throw;
         }
         catch (Exception ex)
         {

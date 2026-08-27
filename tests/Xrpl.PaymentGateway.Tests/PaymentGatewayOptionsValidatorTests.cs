@@ -57,6 +57,17 @@ public class PaymentGatewayOptionsValidatorTests
     }
 
     [Fact]
+    public void AZeroLedgerLagToleranceFails()
+    {
+        // The cursor trails the last validated ledger by one in normal operation, so a tolerance of zero
+        // would make the health report permanently unhealthy with nothing actually wrong.
+        PaymentGatewayOptions options = Valid();
+        options.MaxAcceptableLedgerLag = 0;
+
+        Assert.Contains("MaxAcceptableLedgerLag", Validate(options).FailureMessage);
+    }
+
+    [Fact]
     public void ANonPositiveStallTimeoutFails()
     {
         PaymentGatewayOptions options = Valid();

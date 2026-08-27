@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Npgsql;
 using Xrpl.PaymentGateway.Abstractions;
 
@@ -15,6 +16,8 @@ namespace Xrpl.PaymentGateway.Postgres;
 /// </remarks>
 public sealed class PostgresPaymentStore : IPaymentStore
 {
+    private static readonly Regex SchemaName = new Regex("^[A-Za-z_][A-Za-z0-9_]{0,62}$", RegexOptions.Compiled);
+
     private readonly string _connectionString;
     private readonly string _schema;
     private readonly uint _firstDestinationTag;
@@ -32,6 +35,12 @@ public sealed class PostgresPaymentStore : IPaymentStore
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
         ArgumentException.ThrowIfNullOrWhiteSpace(schema);
+        if (!SchemaName.IsMatch(schema))
+        {
+            // The schema name is an identifier, so it is quoted into every statement rather than passed
+            // as a parameter. Rejecting anything that is not a plain identifier keeps that safe.
+            throw new ArgumentException($"schema \"{schema}\" must be a plain SQL identifier: a letter or underscore followed by letters, digits or underscores.", nameof(schema));
+        }
         if (firstDestinationTag == 0)
         {
             throw new ArgumentOutOfRangeException(nameof(firstDestinationTag), "destination tag 0 is not issued");
@@ -54,7 +63,8 @@ public sealed class PostgresPaymentStore : IPaymentStore
             CREATE SCHEMA IF NOT EXISTS "{_schema}";
 
             CREATE SEQUENCE IF NOT EXISTS "{_schema}".destination_tag_seq
-                AS BIGINT START WITH {_firstDestinationTag} MINVALUE {_firstDestinationTag} NO CYCLE;
+                AS BIGINT START WITH {_firstDestinationTag} MINVALUE {_firstDestinationTag}
+                MAXVALUE 4294967295 NO CYCLE;
 
             CREATE TABLE IF NOT EXISTS "{_schema}".buyers (
                 buyer_id        TEXT   PRIMARY KEY,
@@ -105,7 +115,9 @@ public sealed class PostgresPaymentStore : IPaymentStore
             object? found = await existing.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
             if (found is long tag)
             {
-                return (uint)tag;
+                // Unchecked, a value past uint.MaxValue would wrap onto some other buyer's tag, which is
+                // a misattributed payment. The sequence cannot produce one, but the cast says so too.
+                return checked((uint)tag);
             }
         }
 

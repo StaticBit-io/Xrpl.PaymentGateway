@@ -53,7 +53,7 @@ a payment; instead the monitor pauses, the ledger cursor stops advancing, and th
 | `StreamBufferCapacity` | `int` | `1000` | Events held between the socket and processing. Overflowing it drops the session deliberately: catch-up recollects everything from the ledger, so the buffer is never the system of record. Must be positive. |
 | `ReconcileWindow` | `uint` | `2000` | Ledgers below the cursor that `ReconcileAsync` re-verifies — roughly two hours. Must be greater than zero. Run reconciliation more often than this window, or ledgers exist that no sweep ever covers. |
 | `HealthUnhandledSampleSize` | `int` | `100` | Cap on how many undelivered payments a health check counts and a reconciliation run redelivers per pass. Must be positive. |
-| `MaxAcceptableLedgerLag` | `uint` | `10` | Ledgers the cursor may trail the network by while the health report still calls itself healthy. |
+| `MaxAcceptableLedgerLag` | `uint` | `10` | Ledgers the cursor may trail the network by while the health report still calls itself healthy. Must be at least `1`: the cursor marks proven completeness, so it trails the last validated ledger by one even when nothing is wrong. |
 
 ## Tags are the store's job
 

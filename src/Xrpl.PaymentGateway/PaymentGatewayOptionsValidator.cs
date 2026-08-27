@@ -53,6 +53,13 @@ public sealed class PaymentGatewayOptionsValidator : IValidateOptions<PaymentGat
             failures.Add($"{nameof(options.ReconcileWindow)} must be greater than zero.");
         }
 
+        if (options.MaxAcceptableLedgerLag == 0)
+        {
+            // The cursor marks proven completeness, so it trails the last validated ledger by one even
+            // when everything is working. A tolerance of zero would report unhealthy forever.
+            failures.Add($"{nameof(options.MaxAcceptableLedgerLag)} must be at least 1; the cursor trails the last validated ledger by one in normal operation.");
+        }
+
         if (options.ReconnectBaseDelay > options.ReconnectMaxDelay)
         {
             failures.Add($"{nameof(options.ReconnectBaseDelay)} must not exceed {nameof(options.ReconnectMaxDelay)}.");
