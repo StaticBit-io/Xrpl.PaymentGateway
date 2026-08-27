@@ -1,8 +1,14 @@
+using System.Text.Json.Serialization;
 using Xrpl.PaymentGateway;
 using Xrpl.PaymentGateway.Abstractions;
 using Xrpl.PaymentGateway.SampleApi;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+
+// PaymentMonitorState reaches the page as "Streaming" rather than 3. A number would force every consumer
+// to keep its own copy of the enum's ordering, and that copy goes stale silently.
+builder.Services.ConfigureHttpJsonOptions(options =>
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
 // The store is the host's choice, and this sample makes that concrete: set Xrpl:StorePath and payments
 // survive a restart in a plain file; leave it unset and everything lives in memory. A database is the
@@ -38,30 +44,50 @@ builder.Services.AddXrplPaymentGateway(options =>
 
 WebApplication app = builder.Build();
 
-app.MapPost("/checkout/{buyerId}", async (
+// The checkout page. Plain files, no build step: `dotnet run` is the whole toolchain.
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
+app.MapPost("/api/checkout/{buyerId}", async (
     string buyerId,
     IPaymentGateway gateway,
     CancellationToken cancellationToken) =>
 {
     PaymentInstructions instructions = await gateway.GetPaymentInstructionsAsync(buyerId, cancellationToken);
-    return Results.Ok(new { instructions.Address, instructions.DestinationTag });
+
+    return Results.Ok(new
+    {
+        instructions.Address,
+        instructions.DestinationTag,
+
+        // What a wallet can be handed directly. The amount is left out on purpose: this sample takes
+        // whatever arrives rather than pricing an order.
+        PaymentUri = $"ripple:{instructions.Address}?dt={instructions.DestinationTag}",
+    });
 });
 
-app.MapGet("/payments", (SamplePaymentHandler handler) => Results.Ok(handler.Delivered));
+// What the checkout page polls: has this particular buyer's money arrived yet?
+app.MapGet("/api/checkout/{buyerId}/payments", (string buyerId, SamplePaymentHandler handler) =>
+    Results.Ok(handler.Delivered.Where(p => p.BuyerId == buyerId)));
+
+app.MapGet("/api/payments", (SamplePaymentHandler handler) => Results.Ok(handler.Delivered));
 
 // Reading back everything ever recorded is not part of IPaymentStore — the gateway never needs it — so
 // this endpoint only exists when the sample is running on the in-memory store that offers a snapshot.
-app.MapGet("/recorded", (IPaymentStore store) => store is InMemoryPaymentStore inMemory
+app.MapGet("/api/recorded", (IPaymentStore store) => store is InMemoryPaymentStore inMemory
     ? Results.Ok(inMemory.Snapshot())
     : Results.NotFound(new { message = "the configured store does not expose a snapshot" }));
 
-app.MapGet("/health", async (IPaymentMonitorHealth health, CancellationToken cancellationToken) =>
+app.MapGet("/api/health", async (IPaymentMonitorHealth health, CancellationToken cancellationToken) =>
 {
     PaymentMonitorHealthReport report = await health.CheckAsync(cancellationToken);
+
+    // A monitor that is merely catching up is not yet healthy but is not broken either, so the page gets
+    // the full report in both cases and decides what to show.
     return report.IsHealthy ? Results.Ok(report) : Results.Json(report, statusCode: 503);
 });
 
-app.MapPost("/reconcile", async (IPaymentMonitorHealth health, CancellationToken cancellationToken) =>
+app.MapPost("/api/reconcile", async (IPaymentMonitorHealth health, CancellationToken cancellationToken) =>
     Results.Ok(await health.ReconcileAsync(cancellationToken)));
 
 app.Run();

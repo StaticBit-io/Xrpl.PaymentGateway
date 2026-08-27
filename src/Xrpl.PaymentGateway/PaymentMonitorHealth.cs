@@ -193,10 +193,28 @@ internal sealed class PaymentMonitorHealth : IPaymentMonitorHealth
                 await using IXrplNodeConnection connection = _connectionFactory.Create(candidate);
                 await connection.ConnectAsync(cancellationToken).ConfigureAwait(false);
 
+                // The sweep is a safety net over a recent window, not a proof of completeness, so asking
+                // for ledgers that exist nowhere is pointless strictness — the window simply starts at
+                // the oldest ledger this node holds. Catch-up, which does prove something, has no such
+                // latitude and refuses a node that cannot cover the range it was given.
+                NodeStatus status = await connection.GetNodeStatusAsync(cancellationToken).ConfigureAwait(false);
+                uint sweepFrom = from;
+                if (LedgerRangeSet.TryParse(status.CompleteLedgers, out LedgerRangeSet history)
+                    && history.Earliest is { } earliest
+                    && earliest > sweepFrom)
+                {
+                    sweepFrom = earliest;
+                }
+
+                if (sweepFrom > cursor)
+                {
+                    continue;
+                }
+
                 CatchUpResult result = await _catchUp.RunAsync(
                     connection,
                     _options.Address,
-                    from,
+                    sweepFrom,
                     cursor,
                     async (transaction, token) =>
                     {
@@ -212,7 +230,7 @@ internal sealed class PaymentMonitorHealth : IPaymentMonitorHealth
                     return recovered;
                 }
 
-                errors.Add(result.Reason ?? $"the sweep over {from}-{cursor} on {candidate} could not be proven complete");
+                errors.Add(result.Reason ?? $"the sweep over {sweepFrom}-{cursor} on {candidate} could not be proven complete");
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

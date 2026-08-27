@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Xrpl.PaymentGateway checkout</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="icon" href="data:," />
+</head>
+<body>
+    <header class="monitor" id="monitor" aria-live="polite">
+        <span class="monitor-dot" id="monitor-dot"></span>
+        <span class="monitor-text" id="monitor-text">checking the monitor&hellip;</span>
+        <button type="button" id="reconcile" class="link" title="Redeliver anything the handler never accepted and re-verify recent ledgers">
+            run reconciliation
+        </button>
+    </header>
+
+    <main>
+        <h1>Checkout</h1>
+        <p class="lede">
+            A buyer arrives, gets an address and a destination tag, and pays. This page polls until the
+            gateway reports the payment. It is a demonstration of the library, not a shop.
+        </p>
+
+        <section class="card" id="step-buyer">
+            <h2>1. Who is paying</h2>
+            <form id="checkout-form">
+                <label for="buyer">Buyer id</label>
+                <div class="row">
+                    <input type="text" id="buyer" name="buyer" autocomplete="off" spellcheck="false"
+                           placeholder="buyer-1" required />
+                    <button type="submit" id="checkout">Get payment instructions</button>
+                </div>
+                <p class="hint">
+                    Ask twice with the same id and the same tag comes back &mdash; that is the whole point of
+                    the tag. A new id gets the next one.
+                </p>
+            </form>
+            <p class="error" id="checkout-error" hidden></p>
+        </section>
+
+        <section class="card" id="step-pay" hidden>
+            <h2>2. Send the payment</h2>
+
+            <div class="field">
+                <span class="field-label">Address</span>
+                <div class="row">
+                    <code id="pay-address"></code>
+                    <button type="button" class="copy" data-copy="pay-address">copy</button>
+                </div>
+            </div>
+
+            <div class="field">
+                <span class="field-label">Destination tag</span>
+                <div class="row">
+                    <code id="pay-tag" class="tag"></code>
+                    <button type="button" class="copy" data-copy="pay-tag">copy</button>
+                </div>
+                <p class="hint">
+                    Without the tag the payment still arrives, but nothing ties it to this buyer &mdash; it is
+                    recorded with no buyer attached.
+                </p>
+            </div>
+
+            <div class="field">
+                <span class="field-label">Wallet link</span>
+                <div class="row">
+                    <code id="pay-uri" class="uri"></code>
+                    <button type="button" class="copy" data-copy="pay-uri">copy</button>
+                </div>
+            </div>
+
+            <details class="cli">
+                <summary>Sending from the standalone stand instead</summary>
+                <p class="hint">
+                    Paste this into a shell with the stand running. It funds a throwaway account, then pays
+                    the address above with the tag above.
+                </p>
+                <pre id="cli-snippet"></pre>
+                <button type="button" class="copy" data-copy="cli-snippet">copy</button>
+            </details>
+        </section>
+
+        <section class="card" id="step-wait" hidden>
+            <h2>3. Waiting for the ledger</h2>
+            <div class="waiting" id="waiting">
+                <span class="spinner" aria-hidden="true"></span>
+                <span id="waiting-text">Watching for a payment tagged <code id="waiting-tag"></code>&hellip;</span>
+            </div>
+            <ul class="payments" id="payments"></ul>
+        </section>
+    </main>
+
+    <footer>
+        <a href="/api/health">/api/health</a>
+        <a href="/api/payments">/api/payments</a>
+        <a href="/api/recorded">/api/recorded</a>
+    </footer>
+
+    <script src="app.js"></script>
+</body>
+</html>

@@ -159,7 +159,30 @@ entirely; when nothing is listening, they skip themselves rather than fail.
 
 ## Sample
 
-`samples/Xrpl.PaymentGateway.SampleApi` is a minimal ASP.NET Core host wiring the whole surface together:
-`POST /checkout/{buyerId}` for instructions, `GET /payments` for what the handler received, `GET /recorded`
-for what the store holds, `GET /health`, and `POST /reconcile`. Point `Xrpl:Address` at a receiving account
-and run it.
+`samples/Xrpl.PaymentGateway.SampleApi` is a minimal API with a checkout page in front of it — the whole
+surface, end to end, in something you can click. No build step and no package manager: the page is three
+static files, so `dotnet run` is the entire toolchain.
+
+```
+docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml up -d
+Xrpl__Address=rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh dotnet run --project samples/Xrpl.PaymentGateway.SampleApi
+```
+
+Open the printed URL. Enter a buyer id, take the address and destination tag, and pay. The page polls
+until the gateway reports the payment; the strip along the top shows the monitor's own state, so a
+reconnect or a catch-up is visible rather than looking like nothing happening. The page's own
+"sending from the standalone stand" section prints the calls to pay yourself with no wallet.
+
+`Xrpl:Address` above is the standalone stand's master account, which is convenient for a demo because it
+already exists and is funded. For anything else, point it at your own receiving account.
+
+| Endpoint | |
+|---|---|
+| `POST /api/checkout/{buyerId}` | Address, destination tag, and a `ripple:` URI |
+| `GET /api/checkout/{buyerId}/payments` | What this buyer has paid. The page polls this |
+| `GET /api/payments` | Everything the handler has been given |
+| `GET /api/recorded` | Everything the store holds, when the store offers a snapshot |
+| `GET /api/health` | The monitor's state; 503 when it is not streaming |
+| `POST /api/reconcile` | Redeliver and re-verify on demand |
+
+Set `Xrpl:StorePath` to keep payments in a file instead of memory, and they survive a restart.

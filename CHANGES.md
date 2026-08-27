@@ -28,6 +28,7 @@ First release.
   database-free `FilePaymentStore`, and `InMemoryPaymentStore` for tests and demos. All three are held to
   one `PaymentStoreContract` test suite, concurrency and restart included, so the interface is proven
   satisfiable rather than merely described.
-- A sample API that switches between the in-memory and file stores by configuration.
+- A sample: a minimal API with a checkout page in front of it, in three static files with no build step.
+  It switches between the in-memory and file stores by configuration.
 
 Built against `Xrpl` 11.1.0.

@@ -222,7 +222,7 @@ public class PaymentMonitorHealthTests
     }
 
     [Fact]
-    public async Task ANodeThatCannotProveTheWindowIsReportedAsAnError()
+    public async Task TheSweepStartsAtTheOldestLedgerTheNodeHasRatherThanRefusing()
     {
         Harness harness = new Harness();
         harness.Snapshot.SetCursor(200);
@@ -231,6 +231,41 @@ public class PaymentMonitorHealthTests
 
         ReconciliationResult result = await harness.Health.ReconcileAsync(TestContext.Current.CancellationToken);
 
+        // The window asked for 100-200 and the node only has 180 onwards. A sweep proves nothing, so
+        // re-reading what does exist beats refusing to look — ledgers 1-32569 are gone from the public
+        // network for good, and a fresh standalone stand starts at 2.
+        Assert.Empty(result.Errors);
+        AccountTransactionQuery query = Assert.Single(connection.Queries);
+        Assert.Equal(180u, query.LedgerIndexMin);
+        Assert.Equal(200u, query.LedgerIndexMax);
+    }
+
+    [Fact]
+    public async Task ANodeWhoseHistoryStopsBelowTheWindowIsStillReportedAsAnError()
+    {
+        Harness harness = new Harness();
+        harness.Snapshot.SetCursor(200);
+        FakeXrplNodeConnection connection = harness.Factory.For(Node);
+        connection.Status = new NodeStatus { ServerState = "full", ValidatedLedgerIndex = 200, CompleteLedgers = "1-50" };
+
+        ReconciliationResult result = await harness.Health.ReconcileAsync(TestContext.Current.CancellationToken);
+
+        // Clamping the start does not make a node that stops at 50 able to answer for 100-200.
         Assert.NotEmpty(result.Errors);
+    }
+
+    [Fact]
+    public async Task ANodeThatHoldsNothingAboveTheCursorIsSkippedWithoutQuerying()
+    {
+        Harness harness = new Harness();
+        harness.Snapshot.SetCursor(200);
+        FakeXrplNodeConnection connection = harness.Factory.For(Node);
+        connection.Status = new NodeStatus { ServerState = "full", ValidatedLedgerIndex = 900, CompleteLedgers = "800-900" };
+
+        ReconciliationResult result = await harness.Health.ReconcileAsync(TestContext.Current.CancellationToken);
+
+        // Its oldest ledger is past the cursor entirely, so there is no window left to sweep.
+        Assert.Empty(connection.Queries);
+        Assert.Equal(0, result.RecoveredCount);
     }
 }

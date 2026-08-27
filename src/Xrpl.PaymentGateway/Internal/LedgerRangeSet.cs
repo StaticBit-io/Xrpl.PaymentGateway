@@ -76,6 +76,28 @@ internal sealed class LedgerRangeSet
     }
 
     /// <summary>
+    /// The oldest ledger the node still holds, or null when it holds none. Ledgers 1-32569 are gone from
+    /// the public network entirely, and a fresh standalone stand starts at 2, so "as far back as the
+    /// caller asked" and "as far back as anybody has" are not the same number.
+    /// </summary>
+    public uint? Earliest
+    {
+        get
+        {
+            uint? earliest = null;
+            foreach (LedgerRange range in _ranges)
+            {
+                if (earliest is null || range.From < earliest)
+                {
+                    earliest = range.From;
+                }
+            }
+
+            return earliest;
+        }
+    }
+
+    /// <summary>
     /// True when one contiguous reported range contains the whole span. Adjacent ranges are deliberately not
     /// merged: rippled reports contiguous history as one range, so two ranges mean a real gap between them.
     /// </summary>
