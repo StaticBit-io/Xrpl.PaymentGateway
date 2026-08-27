@@ -47,9 +47,15 @@ public static class StandaloneFixture
     }
 
     /// <summary>Creates a funded account and waits until the ledger has validated it.</summary>
-    public static async Task<XrplWallet> CreateFundedWalletAsync(XrplClient client, decimal xrp = 400m)
+    public static Task<XrplWallet> CreateFundedWalletAsync(XrplClient client, decimal xrp = 400m) =>
+        FundWalletAsync(client, XrplWallet.Generate(), xrp);
+
+    /// <summary>
+    /// Funds an account the caller already chose. Separate from generating one because a test may need an
+    /// address with a particular property — which side of a trust line it will end up on, say.
+    /// </summary>
+    public static async Task<XrplWallet> FundWalletAsync(XrplClient client, XrplWallet wallet, decimal xrp = 400m)
     {
-        XrplWallet wallet = XrplWallet.Generate();
         XrplWallet master = XrplWallet.FromSeed(MasterSecret);
 
         Payment funding = new Payment
@@ -128,6 +134,78 @@ public static class StandaloneFixture
         // Submit.TxJson is declared as object, so it has no Hash. Submit.Transaction is the computed
         // ITransactionResponse that does.
         return response.Transaction?.Hash ?? string.Empty;
+    }
+
+    /// <summary>
+    /// Lets the issuer's token move between two holders. Without it a token can only be sent back to the
+    /// issuer, and a buyer paying a merchant is a move between two holders.
+    /// </summary>
+    public static async Task SetDefaultRippleAsync(XrplClient client, XrplWallet issuer)
+    {
+        AccountSet enableRippling = new AccountSet
+        {
+            Account = issuer.ClassicAddress,
+            SetFlag = AccountSetAsfFlags.asfDefaultRipple,
+        };
+
+        await SubmitAndWaitAsync(client, enableRippling, issuer, "enabling DefaultRipple");
+    }
+
+    /// <summary>Opens a trust line from <paramref name="holder"/> to an issuer for one currency.</summary>
+    public static async Task CreateTrustLineAsync(
+        XrplClient client,
+        XrplWallet holder,
+        string issuer,
+        string currency,
+        string limit)
+    {
+        TrustSet trust = new TrustSet
+        {
+            Account = holder.ClassicAddress,
+            LimitAmount = new Currency { CurrencyCode = currency, Issuer = issuer, Value = limit },
+        };
+
+        await SubmitAndWaitAsync(client, trust, holder, $"opening a {currency} trust line for {holder.ClassicAddress}");
+    }
+
+    /// <summary>Sends an issued currency, optionally tagged.</summary>
+    public static async Task SendIouPaymentAsync(
+        XrplClient client,
+        XrplWallet from,
+        string destination,
+        uint? destinationTag,
+        string issuer,
+        string currency,
+        string value)
+    {
+        Payment payment = new Payment
+        {
+            Account = from.ClassicAddress,
+            Destination = destination,
+            DestinationTag = destinationTag,
+            Amount = new Currency { CurrencyCode = currency, Issuer = issuer, Value = value },
+        };
+
+        await SubmitAndWaitAsync(client, payment, from, $"sending {value} {currency} to {destination}");
+    }
+
+    /// <summary>
+    /// Submits and waits for the ledger to close over it. Every step of building a token economy depends
+    /// on the previous one being validated, and the stand closes a ledger every four seconds.
+    /// </summary>
+    private static async Task SubmitAndWaitAsync(
+        XrplClient client,
+        ITransactionRequest transaction,
+        XrplWallet wallet,
+        string what)
+    {
+        Submit response = await client.Submit(transaction, wallet, true);
+        if (response.EngineResult != "tesSUCCESS")
+        {
+            throw new InvalidOperationException($"{what} failed with {response.EngineResult}");
+        }
+
+        await Task.Delay(TimeSpan.FromSeconds(6));
     }
 
     /// <summary>The node's current validated ledger index.</summary>

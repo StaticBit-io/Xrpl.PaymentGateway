@@ -145,7 +145,13 @@ dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -trait- "Category=Integr
 
 Integration tests need the stand: a standalone node on `ws://localhost:6006` and, for the Postgres
 store's contract tests, a database on `localhost:55432`. Both come up together, and each test skips itself
-rather than failing when its dependency is missing:
+rather than failing when its dependency is missing.
+
+They build a small economy on the ledger — a receiving account, two token issuers, two buyers — and then
+pay it in XRP and in an issued currency. That takes about a minute and a half of closed ledgers, most of
+it setup. The two issuers exist because a trust line's sides are ordered by comparing account ids, and
+which side the receiving account lands on changes the shape of the metadata a payment produces; one issuer
+would test whichever case the random addresses happened to give.
 
 ```
 docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml up -d

@@ -23,6 +23,8 @@ First release.
   amount the balance reader does not understand — is logged as an error and counted, never skipped
   quietly.
 - Amounts computed from transaction metadata balance changes, so partial payments record what arrived.
+  Issued currencies are covered against a real ledger from both sides of a trust line, not only against
+  hand-written metadata.
 - `IPaymentMonitorHealth` for liveness reporting and reconciliation from any scheduler.
 - Three stores to choose from: `PostgresPaymentStore` (in `Xrpl.PaymentGateway.Postgres`), a
   database-free `FilePaymentStore`, and `InMemoryPaymentStore` for tests and demos. All three are held to
