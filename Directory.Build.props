@@ -10,6 +10,14 @@
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/StaticBit-io/Xrpl.PaymentGateway</RepositoryUrl>
     <PackageProjectUrl>https://github.com/StaticBit-io/Xrpl.PaymentGateway</PackageProjectUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageVersion>0.1.0</PackageVersion>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- One README for all three packages: it describes choosing a store and what the gateway guarantees,
+         which is what someone landing on any of them needs. Packed from the repository root, so the file
+         on nuget.org and the file on GitHub cannot drift apart. -->
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
 </Project>
