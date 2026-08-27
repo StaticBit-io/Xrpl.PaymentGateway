@@ -29,6 +29,11 @@ else
     builder.Services.AddSingleton<IPaymentStore>(_ => new FilePaymentStore(storePath, firstTag));
 }
 
+// The X-address carries the network it is for, so this has to be told which one. The documented demo
+// runs against the standalone stand, hence the default; point the sample at mainnet and set it to false.
+builder.Services.AddSingleton(new CheckoutPresentation(
+    builder.Configuration.GetValue<bool?>("Xrpl:IsTestNetwork") ?? true));
+
 builder.Services.AddSingleton<SamplePaymentHandler>();
 builder.Services.AddSingleton<IPaymentReceivedHandler>(services => services.GetRequiredService<SamplePaymentHandler>());
 
@@ -51,6 +56,7 @@ app.UseStaticFiles();
 app.MapPost("/api/checkout/{buyerId}", async (
     string buyerId,
     IPaymentGateway gateway,
+    CheckoutPresentation presentation,
     CancellationToken cancellationToken) =>
 {
     PaymentInstructions instructions = await gateway.GetPaymentInstructionsAsync(buyerId, cancellationToken);
@@ -60,10 +66,23 @@ app.MapPost("/api/checkout/{buyerId}", async (
         instructions.Address,
         instructions.DestinationTag,
 
-        // What a wallet can be handed directly. The amount is left out on purpose: this sample takes
-        // whatever arrives rather than pricing an order.
-        PaymentUri = $"ripple:{instructions.Address}?dt={instructions.DestinationTag}",
+        // One string carrying both, which is what a scanner can be given without losing the tag.
+        XAddress = presentation.ToXAddress(instructions),
     });
+});
+
+// The same X-address as a picture. Recomputed from the buyer id rather than taken from the query, so the
+// image cannot be pointed at somebody else's tag.
+app.MapGet("/api/checkout/{buyerId}/qr.svg", async (
+    string buyerId,
+    IPaymentGateway gateway,
+    CheckoutPresentation presentation,
+    CancellationToken cancellationToken) =>
+{
+    PaymentInstructions instructions = await gateway.GetPaymentInstructionsAsync(buyerId, cancellationToken);
+    string svg = presentation.ToQrSvg(presentation.ToXAddress(instructions));
+
+    return Results.Content(svg, "image/svg+xml");
 });
 
 // What the checkout page polls: has this particular buyer's money arrived yet?

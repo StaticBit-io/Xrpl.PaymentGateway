@@ -285,3 +285,32 @@ footer {
 }
 
 footer a { color: var(--muted); }
+
+.scan {
+    display: flex;
+    gap: 1.1rem;
+    align-items: flex-start;
+    flex-wrap: wrap;
+}
+
+/* Always white behind the modules. Inverting a QR code for dark mode looks tidier and scans worse. */
+.qr {
+    flex: none;
+    background: #ffffff;
+    border: 1px solid var(--border);
+    border-radius: .5rem;
+    padding: .4rem;
+}
+
+.scan-text {
+    flex: 1 1 16rem;
+    min-width: 0;
+}
+
+.scan-text .hint:first-child { margin-top: 0; }
+
+code.inline {
+    display: inline;
+    padding: .1rem .3rem;
+    font-size: .8rem;
+}

@@ -173,12 +173,20 @@ until the gateway reports the payment; the strip along the top shows the monitor
 reconnect or a catch-up is visible rather than looking like nothing happening. The page's own
 "sending from the standalone stand" section prints the calls to pay yourself with no wallet.
 
+The QR code carries an **X-address**, not a bare account: one string holding the address and the
+destination tag together. A scanner given a classic address drops the tag, and a payment without the tag
+lands on the account attached to nobody. The X-address also encodes which network it is for — the sample
+flags it as test, matching the standalone stand, so set `Xrpl:IsTestNetwork` to `false` before pointing it
+at mainnet or wallets there will refuse the code. Test X-addresses begin with `T`, mainnet ones with `X`,
+which makes a mistake visible at a glance.
+
 `Xrpl:Address` above is the standalone stand's master account, which is convenient for a demo because it
 already exists and is funded. For anything else, point it at your own receiving account.
 
 | Endpoint | |
 |---|---|
-| `POST /api/checkout/{buyerId}` | Address, destination tag, and a `ripple:` URI |
+| `POST /api/checkout/{buyerId}` | Address, destination tag, and an X-address carrying both |
+| `GET /api/checkout/{buyerId}/qr.svg` | The X-address as a scannable QR code |
 | `GET /api/checkout/{buyerId}/payments` | What this buyer has paid. The page polls this |
 | `GET /api/payments` | Everything the handler has been given |
 | `GET /api/recorded` | Everything the store holds, when the store offers a snapshot |

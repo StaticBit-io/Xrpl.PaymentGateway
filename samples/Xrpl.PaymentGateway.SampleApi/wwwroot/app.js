@@ -103,7 +103,8 @@ el("checkout-form").addEventListener("submit", async (event) => {
 
         el("pay-address").textContent = instructions.address;
         el("pay-tag").textContent = instructions.destinationTag;
-        el("pay-uri").textContent = instructions.paymentUri;
+        el("pay-xaddress").textContent = instructions.xAddress;
+        el("pay-qr").src = `/api/checkout/${encodeURIComponent(requested)}/qr.svg`;
         el("waiting-tag").textContent = instructions.destinationTag;
         el("cli-snippet").textContent = standaloneSnippet(instructions);
 

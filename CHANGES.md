@@ -29,6 +29,7 @@ First release.
   one `PaymentStoreContract` test suite, concurrency and restart included, so the interface is proven
   satisfiable rather than merely described.
 - A sample: a minimal API with a checkout page in front of it, in three static files with no build step.
-  It switches between the in-memory and file stores by configuration.
+  It switches between the in-memory and file stores by configuration, and offers the checkout as a
+  scannable X-address, which carries the destination tag a bare address would lose.
 
 Built against `Xrpl` 11.1.0.

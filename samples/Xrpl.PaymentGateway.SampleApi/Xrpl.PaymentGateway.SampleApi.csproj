@@ -9,4 +9,10 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Xrpl.PaymentGateway\Xrpl.PaymentGateway.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- Sample only. The published packages stay free of it: drawing a QR code is a property of this
+         demonstration, not of accepting payments. -->
+    <PackageReference Include="QRCoder" Version="1.8.0" />
+  </ItemGroup>
 </Project>

@@ -64,10 +64,25 @@
             </div>
 
             <div class="field">
-                <span class="field-label">Wallet link</span>
-                <div class="row">
-                    <code id="pay-uri" class="uri"></code>
-                    <button type="button" class="copy" data-copy="pay-uri">copy</button>
+                <span class="field-label">Or scan this</span>
+                <div class="scan">
+                    <img id="pay-qr" class="qr" alt="QR code carrying the X-address for this checkout" width="180" height="180" />
+                    <div class="scan-text">
+                        <p class="hint">
+                            The code carries an <strong>X-address</strong>: one string holding the address
+                            <em>and</em> the tag together, so a scan cannot drop the tag and leave the payment
+                            attached to nobody.
+                        </p>
+                        <div class="row">
+                            <code id="pay-xaddress" class="uri"></code>
+                            <button type="button" class="copy" data-copy="pay-xaddress">copy</button>
+                        </div>
+                        <p class="hint">
+                            It also encodes which network it is for. This sample flags it as test; set
+                            <code class="inline">Xrpl:IsTestNetwork</code> to false for mainnet, or wallets
+                            there will refuse it.
+                        </p>
+                    </div>
                 </div>
             </div>
 
