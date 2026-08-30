@@ -242,6 +242,64 @@ public class XrplPaymentMonitorTests
     }
 
     [Fact]
+    public async Task APaymentThatArrivedWhileTheSocketWasDownIsFoundOnReconnect()
+    {
+        // The half nobody was proving end to end: a live monitor loses its connection, the network keeps
+        // closing ledgers, and a payment lands in one of them. That the reconnect issues a catch-up over
+        // the right range, and that a catch-up records what it finds, were each covered on their own.
+        await using Harness harness = new Harness(firstDestinationTag: 42);
+        foreach (Uri node in new[] { NodeA, NodeB })
+        {
+            harness.Factory.For(node).Status = new NodeStatus
+            {
+                ServerState = "full",
+                ValidatedLedgerIndex = 99,
+                CompleteLedgers = "1-99",
+            };
+        }
+
+        await harness.StartAsync();
+        await TestWait.UntilAsync(
+            () => harness.Snapshot.Read().State == PaymentMonitorState.Streaming, "the monitor to start streaming");
+        Assert.Equal(42u, await harness.Store.GetOrAssignTagAsync("buyer-42", TestContext.Current.CancellationToken));
+        Assert.Empty(harness.Handler.Deliveries);
+
+        // The network moved on while nothing was listening, and the fixture's payment sits in ledger 100.
+        foreach (Uri node in new[] { NodeA, NodeB })
+        {
+            harness.Factory.For(node).Status = new NodeStatus
+            {
+                ServerState = "full",
+                ValidatedLedgerIndex = 130,
+                CompleteLedgers = "1-130",
+            };
+        }
+
+        harness.Factory.For(NodeB).EnqueuePage(new AccountTransactionPage
+        {
+            Transactions = new[] { TransactionFixtures.Parse(TransactionFixtures.XrpPayment) },
+            Marker = null,
+            LedgerIndexMin = 100,
+            LedgerIndexMax = 130,
+        });
+
+        await harness.Factory.For(NodeA).EndSessionAsync("socket closed");
+
+        await TestWait.UntilAsync(
+            () => harness.Handler.Deliveries.Count == 1,
+            "the payment sent during the outage to reach the handler after the reconnect");
+
+        // The monitor never saw this transaction live: only the catch-up on the new session could find it.
+        AccountTransactionQuery query = Assert.Single(harness.Factory.For(NodeB).Queries);
+        Assert.Equal(100u, query.LedgerIndexMin);
+        Assert.Equal(130u, query.LedgerIndexMax);
+
+        Assert.Equal(1m, harness.Handler.Deliveries[0].Payment.Value);
+        Assert.Equal("buyer-42", harness.Handler.Deliveries[0].BuyerId);
+        Assert.Equal(130u, await harness.Store.GetLastProcessedLedgerAsync(TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
     public async Task AStalledOutOfSyncNodeIsAbandonedForTheNextOne()
     {
         await using Harness harness = new Harness(options => options.LedgerStallTimeout = TimeSpan.FromMilliseconds(100));
