@@ -131,6 +131,44 @@ public class QuoteHealthTests
     }
 
     [Fact]
+    public async Task AnUndeliveredValuationReportsHowLongItHasBeenWaiting()
+    {
+        (QuoteHealth health, InMemoryQuoteStore store, QuoteRegistry registry) = Build();
+        await store.SaveQuoteAsync(Quote(), Ct);
+        registry.SetSnapshot(Xpm.Key, new StubQuoteSnapshot(capturedAt: Now));
+        await store.TryEnqueueValuationAsync(
+            new PaymentValuation
+            {
+                TransactionHash = "HASH1",
+                PairKey = Xpm.Key,
+                Amount = 1000m,
+                PaymentLedgerIndex = 901,
+                EnqueuedAt = Now.AddMinutes(-30),
+            },
+            Ct);
+        await store.SaveValuationAsync(
+            new PaymentValuation
+            {
+                TransactionHash = "HASH1",
+                PairKey = Xpm.Key,
+                Amount = 1000m,
+                PaymentLedgerIndex = 901,
+                EnqueuedAt = Now.AddMinutes(-30),
+                ValuedAt = Now.AddMinutes(-29),
+                QuoteAmount = 10m,
+            },
+            Ct);
+
+        QuoteHealthReport report = await health.CheckAsync(Ct);
+
+        Assert.Equal(1, report.UndeliveredValuations);
+        Assert.Equal(TimeSpan.FromMinutes(30), report.OldestUndeliveredAge);
+        // A queue that is not draining is still not unhealthy by itself — the age is what an operator
+        // alerts on, not IsHealthy.
+        Assert.True(report.IsHealthy);
+    }
+
+    [Fact]
     public async Task AStoreThatCannotBeReadIsNeverHealthy()
     {
         QuoteOptions options = new QuoteOptions { Pairs = new[] { Xpm } };
