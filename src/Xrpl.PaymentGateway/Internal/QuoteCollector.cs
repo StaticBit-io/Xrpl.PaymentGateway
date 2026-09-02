@@ -65,7 +65,18 @@ internal sealed class QuoteCollector : BackgroundService
                     return;
                 }
 
-                await RefreshAsync(pair, stoppingToken).ConfigureAwait(false);
+                try
+                {
+                    await RefreshAsync(pair, stoppingToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    // RefreshAsync rethrows only when shutdown, not the capture timeout, caused the
+                    // cancellation. Left uncaught here that exception would escape ExecuteAsync itself
+                    // and leave the BackgroundService's execute task in an unexpected state instead of
+                    // completing normally, the way every other exit from this loop does.
+                    return;
+                }
 
                 try
                 {
@@ -83,6 +94,7 @@ internal sealed class QuoteCollector : BackgroundService
     {
         DateTimeOffset attemptedAt = _timeProvider.GetUtcNow();
         StoredQuote? previous = null;
+        bool previousReadFailed = false;
 
         try
         {
@@ -94,7 +106,10 @@ internal sealed class QuoteCollector : BackgroundService
         }
         catch (Exception ex)
         {
-            // Reading the previous row is a nicety; failing to read it must not skip the refresh.
+            // Reading the previous row is a nicety; failing to read it must not skip the refresh. But
+            // "could not read it" is not the same fact as "there is no previous row" — see the failure
+            // branch below, which must not conflate the two.
+            previousReadFailed = true;
             _logger.LogWarning(ex, "reading the stored quote for {Pair} failed", pair.Key);
         }
 
@@ -121,6 +136,16 @@ internal sealed class QuoteCollector : BackgroundService
             // about whether the pair still has liquidity, and overwriting a working quote with nothing
             // would turn a network blip into a checkout outage.
             _logger.LogError(ex, "refreshing the quote for {Pair} failed; the last good reading is kept", pair.Key);
+
+            if (previousReadFailed)
+            {
+                // We do not know what the previous row held, so a failure record built from "no
+                // previous row" would overwrite a possibly-good reading with a hollow one. Skip the
+                // write: the next cycle either reads the row successfully or fails the same way and
+                // gets another chance, but it never persists a worse row than the one already stored.
+                return;
+            }
+
             await WriteAsync(Failure(pair, previous, attemptedAt, ex), stoppingToken).ConfigureAwait(false);
         }
     }
