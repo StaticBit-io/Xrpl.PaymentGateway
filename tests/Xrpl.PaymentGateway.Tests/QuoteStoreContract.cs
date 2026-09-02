@@ -86,6 +86,42 @@ public abstract class QuoteStoreContract
     }
 
     [Fact]
+    public async Task AStoredQuoteSurvivesTheRoundTripIntactRatherThanApproximately()
+    {
+        IQuoteStore store = await CreateAsync();
+        StoredQuote written = new StoredQuote
+        {
+            PairKey = PairKey,
+            Currency = "XPM",
+            Issuer = "rXPMxBeefHGxx2K7g5qmmWq3gFsgawkoa",
+            QuoteCurrency = "USD",
+            QuoteIssuer = "rRLUSDIssuerAddress00000000000000",
+            MarginalPrice = 0.010203m,
+            LedgerIndex = 987654u,
+            CapturedAt = new DateTimeOffset(2026, 8, 30, 11, 55, 0, TimeSpan.Zero),
+            LastAttemptAt = new DateTimeOffset(2026, 8, 30, 12, 3, 0, TimeSpan.Zero),
+            ConsecutiveFailures = 4,
+            LastError = "tecPATH_DRY: no offers crossed the pair",
+        };
+
+        await store.SaveQuoteAsync(written, Ct);
+        StoredQuote? read = await store.GetQuoteAsync(PairKey, Ct);
+
+        Assert.NotNull(read);
+        Assert.Equal(written.PairKey, read.PairKey);
+        Assert.Equal(written.Currency, read.Currency);
+        Assert.Equal(written.Issuer, read.Issuer);
+        Assert.Equal(written.QuoteCurrency, read.QuoteCurrency);
+        Assert.Equal(written.QuoteIssuer, read.QuoteIssuer);
+        Assert.Equal(written.MarginalPrice, read.MarginalPrice);
+        Assert.Equal(written.LedgerIndex, read.LedgerIndex);
+        Assert.Equal(written.CapturedAt, read.CapturedAt);
+        Assert.Equal(written.LastAttemptAt, read.LastAttemptAt);
+        Assert.Equal(written.ConsecutiveFailures, read.ConsecutiveFailures);
+        Assert.Equal(written.LastError, read.LastError);
+    }
+
+    [Fact]
     public async Task WritingAPairAgainReplacesItRatherThanAddingASecondRow()
     {
         IQuoteStore store = await CreateAsync();
@@ -151,6 +187,72 @@ public abstract class QuoteStoreContract
         Assert.NotNull(read);
         Assert.True(read.Delivered);
         Assert.Equal("XPM->XRP->USD", read.Route);
+    }
+
+    [Fact]
+    public async Task AValuationSurvivesTheRoundTripIntactRatherThanApproximately()
+    {
+        IQuoteStore store = await CreateAsync();
+        const string hash = "FULL-ROUNDTRIP";
+        PaymentValuation pending = new PaymentValuation
+        {
+            TransactionHash = hash,
+            PairKey = PairKey,
+            Amount = 1234.5m,
+            PaymentLedgerIndex = 555555u,
+            // DestinationTag is how IPaymentValuedHandler resolves the buyer: IPaymentStore offers no
+            // lookup by transaction hash, and cannot gain one without breaking every 1.0.0 implementation.
+            // A store that drops this field on the way in or out silently breaks buyer attribution.
+            DestinationTag = 909090u,
+            EnqueuedAt = new DateTimeOffset(2026, 8, 30, 12, 0, 5, TimeSpan.Zero),
+        };
+        await store.TryEnqueueValuationAsync(pending, Ct);
+
+        PaymentValuation valued = new PaymentValuation
+        {
+            TransactionHash = hash,
+            PairKey = pending.PairKey,
+            Amount = pending.Amount,
+            PaymentLedgerIndex = pending.PaymentLedgerIndex,
+            DestinationTag = pending.DestinationTag,
+            EnqueuedAt = pending.EnqueuedAt,
+            ValuedAt = new DateTimeOffset(2026, 8, 30, 12, 0, 42, TimeSpan.Zero),
+            QuoteAmount = 12.375m,
+            EffectivePrice = 0.010025m,
+            MarginalPrice = 0.0102m,
+            SlippagePercent = 1.72m,
+            FullyFilled = false,
+            BookTruncated = true,
+            Route = "XPM->XRP->USD",
+            SnapshotLedgerIndex = 555000u,
+            SnapshotCapturedAt = new DateTimeOffset(2026, 8, 30, 11, 59, 30, TimeSpan.Zero),
+        };
+        await store.SaveValuationAsync(valued, Ct);
+        await store.MarkValuationDeliveredAsync(hash, Ct);
+
+        PaymentValuation? read = await store.GetValuationAsync(hash, Ct);
+
+        Assert.NotNull(read);
+        Assert.Equal(valued.TransactionHash, read.TransactionHash);
+        Assert.Equal(valued.PairKey, read.PairKey);
+        Assert.Equal(valued.Amount, read.Amount);
+        Assert.Equal(valued.PaymentLedgerIndex, read.PaymentLedgerIndex);
+        Assert.Equal(valued.DestinationTag, read.DestinationTag);
+        Assert.Equal(valued.EnqueuedAt, read.EnqueuedAt);
+        Assert.Equal(valued.ValuedAt, read.ValuedAt);
+        Assert.Equal(valued.QuoteAmount, read.QuoteAmount);
+        Assert.Equal(valued.EffectivePrice, read.EffectivePrice);
+        Assert.Equal(valued.MarginalPrice, read.MarginalPrice);
+        Assert.Equal(valued.SlippagePercent, read.SlippagePercent);
+        Assert.Equal(valued.FullyFilled, read.FullyFilled);
+        // BookTruncated defaults to false, so asserting true here catches a store that never
+        // persists it and always reads the default back.
+        Assert.True(read.BookTruncated);
+        Assert.Equal(valued.Route, read.Route);
+        Assert.Equal(valued.SnapshotLedgerIndex, read.SnapshotLedgerIndex);
+        Assert.Equal(valued.SnapshotCapturedAt, read.SnapshotCapturedAt);
+        Assert.True(read.Delivered);
+        Assert.True(read.IsValued);
     }
 
     [Fact]
