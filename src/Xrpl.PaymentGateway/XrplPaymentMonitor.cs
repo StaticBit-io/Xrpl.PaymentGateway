@@ -54,7 +54,8 @@ internal sealed class XrplPaymentMonitor : BackgroundService
         IPaymentReceivedHandler handler,
         MonitorSnapshot snapshot,
         TimeProvider timeProvider,
-        ILogger<XrplPaymentMonitor> logger)
+        ILogger<XrplPaymentMonitor> logger,
+        ValuationEnqueuer? valuationEnqueuer = null)
     {
         _options = options.Value;
         _connectionFactory = connectionFactory;
@@ -64,7 +65,7 @@ internal sealed class XrplPaymentMonitor : BackgroundService
         _logger = logger;
         _pool = new NodePool(_options.Nodes);
         _processor = new TransactionProcessor(_options.Address, timeProvider, logger);
-        _dispatcher = new PaymentDispatcher(store, handler, logger);
+        _dispatcher = new PaymentDispatcher(store, handler, logger, valuationEnqueuer);
         _catchUp = new CatchUpRunner(logger);
         _backoff = new ReconnectBackoff(_options.ReconnectBaseDelay, _options.ReconnectMaxDelay);
         _storeRetry = new StoreRetryPolicy(
