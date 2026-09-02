@@ -48,10 +48,24 @@ dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -trait "Category=Integra
 docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml down
 ```
 
-The `-p xrplpg-ci` project name matters: the stand publishes the same ports as the XrplCSharp CI stand, so
-only one of the two can run at a time. If a healthy node is already listening, the tests use it and you can
-skip the Compose step. When a dependency is missing, each test skips itself rather than failing — the suite
-must be runnable without Docker.
+The `-p xrplpg-ci` project name matters: without it Compose treats this stand and the XrplCSharp one as the
+same project. By default both publish the same host ports, so only one can run — but if a healthy node is
+already listening, the tests will simply use it and you can skip the Compose step. When a dependency is
+missing, each test skips itself rather than failing: the suite must be runnable without Docker.
+
+To run this stand **beside** another project's, give it different host ports and tell the tests where to
+look. Container ports never change, so `rippled.cfg` and the ledger-acceptor are unaffected:
+
+```bash
+XRPLPG_ADMIN_WS_PORT=16006 XRPLPG_POSTGRES_PORT=55433 docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml up -d
+```
+
+```bash
+XRPLPG_NODE_URL=ws://localhost:16006 XRPLPG_POSTGRES="Host=localhost;Port=55433;Username=xrplpg;Password=xrplpg;Database=xrplpg" dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -trait "Category=Integration"
+```
+
+`XRPLPG_RPC_PORT` and `XRPLPG_WS_PORT` move the other two node ports the same way. Every variable defaults
+to what CI uses, so leaving them unset changes nothing.
 
 The ledger tests build a small economy — a receiving account, two token issuers, two buyers — and pay it in
 XRP and in an issued currency. Expect about a minute and a half, most of it setup.

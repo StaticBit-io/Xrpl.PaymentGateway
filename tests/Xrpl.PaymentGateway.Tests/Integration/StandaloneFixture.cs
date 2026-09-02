@@ -14,7 +14,12 @@ namespace Xrpl.PaymentGateway.Tests.Integration;
 /// </summary>
 public static class StandaloneFixture
 {
-    public const string NodeUrl = "ws://localhost:6006";
+    /// <summary>
+    /// The stand's admin WebSocket. Override with <c>XRPLPG_NODE_URL</c> to run this repository's stand
+    /// beside another project's on the same machine; the default is what CI and the Compose file use.
+    /// </summary>
+    public static readonly string NodeUrl =
+        Environment.GetEnvironmentVariable("XRPLPG_NODE_URL") ?? "ws://localhost:6006";
     public const string MasterAccount = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
     public const string MasterSecret = "snoPBrXtMeMyMHUVTgbuqAfg1SUTb";
 

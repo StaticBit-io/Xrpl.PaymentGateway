@@ -193,7 +193,9 @@ dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -trait "Category=Integra
 docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml down
 ```
 
-The stand publishes the same ports as the XrplCSharp CI stand, so only one of the two can run at a time.
+By default the stand publishes the same ports as the XrplCSharp CI stand, so only one of the two can run;
+[CONTRIBUTING.md](https://github.com/StaticBit-io/Xrpl.PaymentGateway/blob/release/CONTRIBUTING.md) shows how
+to move this one's ports so both can.
 If a healthy standalone node is already listening there, the tests use it and you can skip the compose step
 entirely; when nothing is listening, they skip themselves rather than fail.
 

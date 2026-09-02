@@ -8,8 +8,13 @@ namespace Xrpl.PaymentGateway.Tests.Integration;
 [Trait("Category", "Integration")]
 public class PostgresQuoteStoreTests : QuoteStoreContract, IAsyncDisposable
 {
-    private const string ConnectionString =
-        "Host=localhost;Port=55432;Username=xrplpg;Password=xrplpg;Database=xrplpg;Include Error Detail=true";
+    /// <summary>
+    /// Override with <c>XRPLPG_POSTGRES</c> to point at a database on a different port, so this
+    /// repository's stand can run beside another project's. The default is what CI and Compose use.
+    /// </summary>
+    private static readonly string ConnectionString =
+        Environment.GetEnvironmentVariable("XRPLPG_POSTGRES")
+        ?? "Host=localhost;Port=55432;Username=xrplpg;Password=xrplpg;Database=xrplpg;Include Error Detail=true";
 
     // A schema per class run, so a failure leaves nothing behind for the next one to trip over.
     private readonly string _schema = "quotes_" + Guid.NewGuid().ToString("N");

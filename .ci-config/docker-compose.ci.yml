@@ -1,7 +1,10 @@
 # Bring this up with an explicit project name so it cannot collide with the XrplCSharp stand:
 #   docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml up -d
-# It publishes the same ports, so only one standalone stand can run at a time. If another project
-# already has a healthy rippled on 5005/5006/6006, use that one instead of starting this.
+# By default it publishes the same ports as the XrplCSharp stand, so only one of the two can run.
+# To run both, give this one different host ports and tell the tests where to look:
+#   XRPLPG_ADMIN_WS_PORT=16006 XRPLPG_POSTGRES_PORT=55433 docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml up -d
+#   XRPLPG_NODE_URL=ws://localhost:16006 XRPLPG_POSTGRES="Host=localhost;Port=55433;Username=xrplpg;Password=xrplpg;Database=xrplpg" dotnet run ...
+# The container ports never change, so the ledger-acceptor and rippled.cfg are unaffected.
 services:
   xrpld:
     image: xrpllabsofficial/xrpld:3.3.0
@@ -9,9 +12,9 @@ services:
     command: ["-a", "--start"]
     ports:
       # Loopback only: every port below grants the admin role, which means node control, not just reads.
-      - "127.0.0.1:5005:5005"
-      - "127.0.0.1:5006:5006"
-      - "127.0.0.1:6006:6006"
+      - "127.0.0.1:${XRPLPG_RPC_PORT:-5005}:5005"
+      - "127.0.0.1:${XRPLPG_WS_PORT:-5006}:5006"
+      - "127.0.0.1:${XRPLPG_ADMIN_WS_PORT:-6006}:6006"
     volumes:
       - ./rippled.cfg:/config/rippled.cfg:ro
       - ./validators.txt:/config/validators.txt:ro
@@ -44,7 +47,7 @@ services:
       POSTGRES_USER: xrplpg
       POSTGRES_DB: xrplpg
     ports:
-      - "127.0.0.1:55432:5432"
+      - "127.0.0.1:${XRPLPG_POSTGRES_PORT:-55432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U xrplpg"]
       interval: 2s
