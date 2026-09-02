@@ -61,6 +61,11 @@ public sealed class QuoteOptionsValidator : IValidateOptions<QuoteOptions>
             failures.Add($"{nameof(options.ValuationBatchSize)} must be positive.");
         }
 
+        if (options.ValuationPollInterval <= TimeSpan.Zero)
+        {
+            failures.Add($"{nameof(options.ValuationPollInterval)} must be positive.");
+        }
+
         return failures.Count == 0
             ? ValidateOptionsResult.Success
             : ValidateOptionsResult.Fail(failures);

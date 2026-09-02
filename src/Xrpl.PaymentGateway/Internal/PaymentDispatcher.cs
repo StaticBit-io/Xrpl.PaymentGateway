@@ -13,17 +13,35 @@ internal sealed class PaymentDispatcher
     private readonly IPaymentStore _store;
     private readonly IPaymentReceivedHandler _handler;
     private readonly ILogger _logger;
+    private readonly ValuationEnqueuer? _valuationEnqueuer;
 
-    public PaymentDispatcher(IPaymentStore store, IPaymentReceivedHandler handler, ILogger logger)
+    public PaymentDispatcher(
+        IPaymentStore store,
+        IPaymentReceivedHandler handler,
+        ILogger logger,
+        ValuationEnqueuer? valuationEnqueuer = null)
     {
         _store = store;
         _handler = handler;
         _logger = logger;
+        _valuationEnqueuer = valuationEnqueuer;
     }
 
     /// <summary>Persists the record. Returns false when the hash was already stored.</summary>
-    public Task<bool> RecordAsync(PaymentRecord record, CancellationToken cancellationToken) =>
-        _store.TryAddPaymentAsync(record, cancellationToken);
+    public async Task<bool> RecordAsync(PaymentRecord record, CancellationToken cancellationToken)
+    {
+        bool added = await _store.TryAddPaymentAsync(record, cancellationToken).ConfigureAwait(false);
+
+        if (_valuationEnqueuer is not null)
+        {
+            // Offered even when the payment was already stored. Reconciliation replays a window of
+            // ledgers precisely so a valuation that never got queued can still be picked up, and the
+            // quote store rejects the duplicate itself.
+            await _valuationEnqueuer.EnqueueAsync(record, cancellationToken).ConfigureAwait(false);
+        }
+
+        return added;
+    }
 
     /// <summary>
     /// Resolves the buyer, hands the payment to the host, and marks it handled on success.

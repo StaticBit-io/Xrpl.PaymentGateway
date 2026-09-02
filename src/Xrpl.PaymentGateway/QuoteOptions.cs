@@ -46,6 +46,13 @@ public sealed class QuoteOptions
     /// <summary>How many queued valuations are processed, and how many delivered, per pass.</summary>
     public int ValuationBatchSize { get; set; } = 50;
 
+    /// <summary>How often the valuation queue is drained.</summary>
+    /// <remarks>
+    /// Much shorter than <see cref="RefreshInterval"/> on purpose: a payment should be priced within
+    /// seconds of arriving, while a book does not need re-reading that often.
+    /// </remarks>
+    public TimeSpan ValuationPollInterval { get; set; } = TimeSpan.FromSeconds(5);
+
     /// <summary>The age limit actually applied.</summary>
     public TimeSpan EffectiveMaxQuoteAge => MaxQuoteAge ?? RefreshInterval * 3;
 }

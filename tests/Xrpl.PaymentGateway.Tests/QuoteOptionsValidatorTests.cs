@@ -94,4 +94,13 @@ public class QuoteOptionsValidatorTests
 
         Assert.Contains("ValuationBatchSize", Validate(options).FailureMessage, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void ANonPositiveValuationPollIntervalFails()
+    {
+        QuoteOptions options = Valid();
+        options.ValuationPollInterval = TimeSpan.Zero;
+
+        Assert.Contains("ValuationPollInterval", Validate(options).FailureMessage, StringComparison.Ordinal);
+    }
 }
