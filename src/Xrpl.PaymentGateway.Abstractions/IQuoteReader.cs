@@ -18,8 +18,11 @@ public interface IQuoteReader
     /// <param name="currency">The currency code to price.</param>
     /// <param name="issuer">The issuer address, or null for XRP.</param>
     /// <param name="amount">
-    /// For <see cref="QuoteDirection.ExactInput"/>, how much of the asset is being sent; for
-    /// <see cref="QuoteDirection.ExactOutput"/>, how much of the quote asset must arrive.
+    /// The pinned side's amount. For <see cref="QuoteDirection.ExactInput"/>, how much of the asset is
+    /// being sent — fills <see cref="QuoteResult.InputAmount"/> on the result. For
+    /// <see cref="QuoteDirection.ExactOutput"/>, how much of the quote asset must arrive — fills
+    /// <see cref="QuoteResult.OutputAmount"/> instead, and the result's <see cref="QuoteResult.InputAmount"/>
+    /// is the amount computed to reach it.
     /// </param>
     /// <param name="direction">The direction of the quote: exact input or exact output.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
