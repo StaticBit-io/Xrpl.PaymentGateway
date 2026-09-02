@@ -88,3 +88,30 @@ public sealed class HangingQuoteSource : IQuoteSource
         return null;
     }
 }
+
+/// <summary>
+/// A snapshot that was captured successfully — it has a ledger and a timestamp — but answers "no
+/// liquidity" for every amount, the documented meaning of <see cref="IQuoteSnapshot.EvaluateAsync"/>
+/// returning null. Distinct from a missing snapshot: the pair is configured and was refreshed, it simply
+/// has nothing to price against right now.
+/// </summary>
+public sealed class NoLiquiditySnapshot : IQuoteSnapshot
+{
+    public NoLiquiditySnapshot(uint ledgerIndex = 900, DateTimeOffset? capturedAt = null)
+    {
+        LedgerIndex = ledgerIndex;
+        CapturedAt = capturedAt ?? DateTimeOffset.UtcNow;
+    }
+
+    public uint LedgerIndex { get; }
+
+    public DateTimeOffset CapturedAt { get; }
+
+    public decimal? MarginalPrice => null;
+
+    public ValueTask<QuoteResult?> EvaluateAsync(
+        decimal amount,
+        QuoteDirection direction,
+        CancellationToken cancellationToken) =>
+        new ValueTask<QuoteResult?>((QuoteResult?)null);
+}

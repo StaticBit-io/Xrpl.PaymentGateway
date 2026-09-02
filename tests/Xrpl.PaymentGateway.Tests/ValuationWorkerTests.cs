@@ -179,10 +179,73 @@ public class ValuationWorkerTests
     }
 
     [Fact]
+    public async Task ANoLiquidityAnswerLeavesThePaymentQueuedRatherThanValuingItAtNothing()
+    {
+        // The snapshot is fresh and present — this is not the "nothing captured yet" or "stale" case
+        // covered elsewhere — but EvaluateAsync itself reports no liquidity, which ValuePendingAsync must
+        // treat the same way as not having a usable snapshot at all: leave the entry queued for the next
+        // pass rather than manufacturing a zero valuation.
+        await using Harness harness = new Harness();
+        harness.Registry.SetSnapshot(Xpm.Key, new NoLiquiditySnapshot(capturedAt: Now));
+        await harness.Enqueuer.EnqueueAsync(Payment(), Ct);
+
+        await harness.StartAsync();
+        await Task.Delay(200, Ct);
+
+        Assert.Empty(harness.Handler.Deliveries);
+        Assert.Single(await harness.QuoteStore.GetPendingValuationsAsync(10, Ct));
+    }
+
+    [Fact]
     public async Task AStaleSnapshotDoesNotValueAPaymentWhenStaleQuotesAreRefused()
     {
         await using Harness harness = new Harness();
         harness.Registry.SetSnapshot(Xpm.Key, new StubQuoteSnapshot(capturedAt: Now.AddMinutes(-10)));
+        await harness.Enqueuer.EnqueueAsync(Payment(), Ct);
+
+        await harness.StartAsync();
+        await Task.Delay(200, Ct);
+
+        Assert.Empty(harness.Handler.Deliveries);
+        Assert.Single(await harness.QuoteStore.GetPendingValuationsAsync(10, Ct));
+    }
+
+    [Fact]
+    public async Task ValuateWithFreshSnapshotPricesAgainstANewCaptureRatherThanTheRegistry()
+    {
+        // Nothing sets a registry snapshot for Xpm here. If the worker fell back to the registry instead
+        // of capturing fresh — the ValuateWithFreshSnapshot-off behaviour SnapshotForAsync takes — the
+        // payment would have nothing to price against and would stay queued forever, so a delivery here
+        // is proof the fresh-capture branch, not the registry one, priced it.
+        ScriptedQuoteSource source = new ScriptedQuoteSource();
+        source.Behaviour[Xpm.Key] = () => new StubQuoteSnapshot(price: 0.02m, ledgerIndex: 950, capturedAt: Now);
+        await using Harness harness = new Harness(
+            configure: options => options.ValuateWithFreshSnapshot = true,
+            source: source);
+        await harness.Enqueuer.EnqueueAsync(Payment(), Ct);
+
+        await harness.StartAsync();
+        await TestWait.UntilAsync(
+            () => harness.Handler.Deliveries.Count == 1, "the freshly captured valuation to be delivered");
+
+        Assert.Contains(Xpm.Key, source.Captured);
+        PaymentValuation valuation = harness.Handler.Deliveries[0].Valuation;
+        Assert.Equal(20m, valuation.QuoteAmount);
+        Assert.Equal(950u, valuation.SnapshotLedgerIndex);
+    }
+
+    [Fact]
+    public async Task AFreshCaptureFailureLeavesThePaymentQueuedRatherThanValuingItAtNothing()
+    {
+        // Mirrors WithNoSnapshotYetThePaymentStaysQueuedRatherThanBeingValuedAtNothing, but on the
+        // ValuateWithFreshSnapshot path: SnapshotForAsync's catch logs and returns null on a capture
+        // failure, and ValuePendingAsync must treat a null snapshot the same way it does when nothing has
+        // been captured yet — the payment stays queued rather than disappearing or being valued at zero.
+        ScriptedQuoteSource source = new ScriptedQuoteSource();
+        source.Behaviour[Xpm.Key] = () => throw new InvalidOperationException("node unreachable");
+        await using Harness harness = new Harness(
+            configure: options => options.ValuateWithFreshSnapshot = true,
+            source: source);
         await harness.Enqueuer.EnqueueAsync(Payment(), Ct);
 
         await harness.StartAsync();
