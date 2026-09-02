@@ -23,6 +23,14 @@ public interface IQuoteSnapshot
     /// <summary>
     /// Prices an amount against the captured state. Returns null when the pair holds no liquidity at all.
     /// </summary>
+    /// <param name="amount">
+    /// The pinned side's amount: under <see cref="QuoteDirection.ExactInput"/>, how much of the received
+    /// asset is being priced (fills <see cref="QuoteResult.InputAmount"/>); under
+    /// <see cref="QuoteDirection.ExactOutput"/>, how much of the quote asset is needed (fills
+    /// <see cref="QuoteResult.OutputAmount"/>). The implementation computes the other side.
+    /// </param>
+    /// <param name="direction">Which side <paramref name="amount"/> pins.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     /// <remarks>
     /// Implementations must not perform network I/O: this is called on the checkout request path, and
     /// the whole reason the gateway holds a snapshot is that pricing a size costs nothing afterwards.
