@@ -6,6 +6,9 @@ namespace Xrpl.PaymentGateway.Abstractions;
 /// <remarks>
 /// The gateway deliberately does not compute prices. Order-book and AMM arithmetic is a subject of its
 /// own, and a payment gateway that assumed one engine would be as wrong as one that assumed a database.
+/// This is required once <c>AddXrplPaymentQuotes</c> is called — the collector calls it on every refresh
+/// cycle regardless of configuration — even when <c>ValuateWithFreshSnapshot</c> is off, which only
+/// controls whether <c>ValuationWorker</c> also calls it per payment.
 /// </remarks>
 public interface IQuoteSource
 {
