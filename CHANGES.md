@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.1.0 — unreleased
+
+Quotes and payment valuation, entirely optional: a host that upgrades and changes
+nothing else gets no new background service and no new network traffic.
+
+- `IQuoteSource` lets the host supply the pricing engine. The gateway owns the refresh
+  rhythm, the age policy and delivery; order-book and AMM arithmetic stays outside, the
+  same way storage does.
+- A background collector refreshes each configured pair, spreading pairs evenly across
+  the interval rather than firing them in a burst.
+- A node that cannot be reached keeps the last good reading. Only an answered "there is
+  no liquidity here" clears one — an empty book is what a dropped socket returns too.
+- Quotes carry the age and ledger of the snapshot they came from, and a reading past its
+  age limit is withheld rather than served as though it were current.
+- Received payments are valued behind the payment path, never on it: the payment is
+  recorded and announced first, and the valuation arrives as a second signal through
+  `IPaymentValuedHandler`. Delivery is at least once, retried until the handler accepts it.
+- `IQuoteStore` is separate from `IPaymentStore`, so nothing written against 1.0.0 breaks.
+  In-memory, file and PostgreSQL implementations ship, all held to one `QuoteStoreContract`.
+- `IQuoteHealth` reports pair freshness, failure streaks and queue depth for any scheduler.
+
+Nothing in the 1.0.0 surface changed.
+
 ## 1.0.0 — 2026-08-27
 
 First release.

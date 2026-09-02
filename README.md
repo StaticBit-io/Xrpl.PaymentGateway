@@ -115,6 +115,19 @@ Deliberately out of scope, so that what is in scope can be relied on:
 - **MPT amounts.** See above: not recorded, but not lost quietly either.
 - **A scheduler.** `CheckAsync` and `ReconcileAsync` are called by whatever the host already runs.
 
+## Quotes and valuation
+
+Optionally, the gateway keeps a liquidity reading for each asset you accept, prices any
+size against it without touching the network, and records what each received payment was
+worth in an asset of your choosing.
+
+It does not compute prices itself — you supply an `IQuoteSource`, and the gateway owns the
+refresh rhythm, the age policy and delivery. Valuation runs behind the payment path and
+never on it: the payment is recorded and announced first, and its value arrives as a
+second signal through `IPaymentValuedHandler`.
+
+See the [quotes reference](https://github.com/StaticBit-io/Xrpl.PaymentGateway/blob/release/docs/quotes.md).
+
 ## What it expects of the receiving account
 
 Use a dedicated account that only receives. Specifically, it must not have `DefaultRipple` enabled and

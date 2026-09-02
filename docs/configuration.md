@@ -114,3 +114,8 @@ Setting it on the options alone changes nothing.
 | `RecoveredCount` | `int` | Payments found on the ledger that were missing from the store. **Any value above zero is a defect** — investigate. |
 | `Errors` | `IReadOnlyList<string>` | What went wrong. Non-empty means the run did not finish everything it set out to do. |
 | `Skipped` | `bool` | True when another reconciliation was already running and this call did nothing. |
+
+## Quotes
+
+Quotes are configured separately, by `AddXrplPaymentQuotes`. See
+[quotes.md](quotes.md).
