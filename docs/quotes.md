@@ -73,7 +73,8 @@ When an amount was asked for, `view.Result` carries three things worth checking 
 trusting the number — and it is null when the snapshot answered "no liquidity", the same
 condition that leaves `view.MarginalPrice` null:
 
-- `view.Result.IsFullyFilled` — false means the venues ran dry and the size cannot actually trade.
+- `view.Result.IsFullyFilled` — false means the venues ran dry and the size cannot actually trade. Under
+  `ExactOutput`, a partial fill means `OutputAmount` is what `FilledInput` produces, not the caller's ask.
 - `view.Result.BookTruncated` — the real book may run deeper than what was priced.
 - `view.Result.SlippagePercent` — how much worse the achieved price is than the marginal one.
 
