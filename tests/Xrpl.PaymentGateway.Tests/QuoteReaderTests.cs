@@ -106,6 +106,23 @@ public class QuoteReaderTests
     }
 
     [Fact]
+    public async Task ANoLiquiditySnapshotAnswersWithANullResultRatherThanAMiss()
+    {
+        // Distinct from APairWithNothingCapturedYetHasNoQuote: here the pair is configured and a
+        // snapshot was captured (it has a ledger and CapturedAt), but the snapshot itself reports no
+        // liquidity for the requested amount. The view must come back non-null with only Result null —
+        // conflating this with a genuine miss would tell the caller there is no pair at all.
+        (QuoteReader reader, QuoteRegistry registry) = Build();
+        registry.SetSnapshot(Xpm.Key, new NoLiquiditySnapshot(capturedAt: Now));
+
+        QuoteView? view = await reader.QuoteAsync("XPM", XpmIssuer, 1000m, QuoteDirection.ExactInput, Ct);
+
+        Assert.NotNull(view);
+        Assert.Null(view.MarginalPrice);
+        Assert.Null(view.Result);
+    }
+
+    [Fact]
     public async Task TheHexAndReadableSpellingsReachTheSamePair()
     {
         (QuoteReader reader, QuoteRegistry registry) = Build();
