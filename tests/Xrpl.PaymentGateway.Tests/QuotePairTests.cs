@@ -19,6 +19,25 @@ public class QuotePairTests
     }
 
     [Fact]
+    public void TheTwoSpellingsAreEqualAndCollapseInAHashSet()
+    {
+        // QuotePair promises value equality by being a class with a Key-based Equals/GetHashCode; a host
+        // that puts pairs from two spellings of one asset into a HashSet must end up with one entry, not
+        // a silent duplicate.
+        QuotePair readable = new QuotePair("XPM", XpmIssuer, "USD", UsdIssuer);
+        QuotePair hex = new QuotePair(
+            "00000000000000000000000058504d0000000000", XpmIssuer, "USD", UsdIssuer);
+
+        Assert.Equal(readable, hex);
+        Assert.True(readable == hex);
+        Assert.False(readable != hex);
+        Assert.Equal(readable.GetHashCode(), hex.GetHashCode());
+
+        HashSet<QuotePair> set = new HashSet<QuotePair> { readable, hex };
+        Assert.Single(set);
+    }
+
+    [Fact]
     public void QuotingAgainstXrpNeedsNoIssuer()
     {
         QuotePair pair = new QuotePair("XPM", XpmIssuer, "XRP", null);
