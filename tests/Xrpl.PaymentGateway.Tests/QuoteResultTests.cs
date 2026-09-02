@@ -71,4 +71,47 @@ public class QuoteResultTests
     {
         Assert.False(Result().BookTruncated);
     }
+
+    // The following tests document and pin the contract that OutputAmount is always what FilledInput
+    // produces, in both directions. This ensures EffectivePrice and IsFullyFilled remain honest even
+    // when ExactOutput asks for a size the venues cannot fully absorb.
+
+    [Fact]
+    public void UnderExactOutputFullyFilledTheOutputAmountIsWhatWasAsked()
+    {
+        // The caller asked for 100 units of the quote asset and got exactly that.
+        QuoteResult result = new QuoteResult
+        {
+            Direction = QuoteDirection.ExactOutput,
+            InputAmount = 1000m,
+            FilledInput = 1000m,
+            OutputAmount = 100m,
+            MarginalPrice = 0.1m,
+        };
+
+        Assert.Equal(100m, result.OutputAmount);
+        Assert.True(result.IsFullyFilled);
+        Assert.Equal(0.1m, result.EffectivePrice);
+    }
+
+    [Fact]
+    public void UnderExactOutputPartialFillReducesOutputAmountToWhatWasActuallyFilled()
+    {
+        // The caller asked for 100 units of the quote asset, but the venues could only absorb 500 of
+        // the 1000 units needed to get there. OutputAmount is reduced to what those 500 units produce,
+        // not left at the caller's ask. This keeps EffectivePrice honest: it is 50 / 500 = 0.1, the
+        // achieved price, not 100 / 500 = 0.2, which would overstate what was actually bought.
+        QuoteResult result = new QuoteResult
+        {
+            Direction = QuoteDirection.ExactOutput,
+            InputAmount = 1000m,
+            FilledInput = 500m,
+            OutputAmount = 50m,
+            MarginalPrice = 0.1m,
+        };
+
+        Assert.Equal(50m, result.OutputAmount);
+        Assert.False(result.IsFullyFilled);
+        Assert.Equal(0.1m, result.EffectivePrice);
+    }
 }

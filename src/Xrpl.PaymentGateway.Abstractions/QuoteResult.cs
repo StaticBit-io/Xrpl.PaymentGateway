@@ -1,6 +1,12 @@
 namespace Xrpl.PaymentGateway.Abstractions;
 
-/// <summary>What a given trade size costs, priced against one liquidity snapshot.</summary>
+/// <summary>
+/// What a given trade size costs, priced against one liquidity snapshot. All amount fields are in
+/// pay-to-get terms and always reflect what actually filled: <see cref="OutputAmount"/> is always what
+/// <see cref="FilledInput"/> produces, whether that is the caller's literal ask under
+/// <see cref="QuoteDirection.ExactOutput"/> or the gateway's computed output under
+/// <see cref="QuoteDirection.ExactInput"/>.
+/// </summary>
 public sealed class QuoteResult
 {
     /// <summary>
@@ -35,9 +41,12 @@ public sealed class QuoteResult
     public required decimal FilledInput { get; init; }
 
     /// <summary>
-    /// Quote-asset amount the trade produces. Under <see cref="QuoteDirection.ExactOutput"/> this is the
-    /// amount the caller asked for; under <see cref="QuoteDirection.ExactInput"/> it is what
-    /// <see cref="FilledInput"/> turned out to be worth.
+    /// Quote-asset amount the trade produces. Under <see cref="QuoteDirection.ExactOutput"/> this is always
+    /// the amount that <see cref="FilledInput"/> actually produces (which may be less than the caller's
+    /// requested ask when venues run dry); under <see cref="QuoteDirection.ExactInput"/> it is what
+    /// <see cref="FilledInput"/> turned out to be worth. In both cases, it is derived from what actually
+    /// filled, so <see cref="EffectivePrice"/> and <see cref="SlippagePercent"/> remain honest in
+    /// either direction.
     /// </summary>
     public required decimal OutputAmount { get; init; }
 

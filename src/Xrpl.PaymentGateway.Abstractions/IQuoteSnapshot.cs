@@ -27,7 +27,8 @@ public interface IQuoteSnapshot
     /// The pinned side's amount: under <see cref="QuoteDirection.ExactInput"/>, how much of the received
     /// asset is being priced (fills <see cref="QuoteResult.InputAmount"/>); under
     /// <see cref="QuoteDirection.ExactOutput"/>, how much of the quote asset is needed (fills
-    /// <see cref="QuoteResult.OutputAmount"/>). The implementation computes the other side.
+    /// <see cref="QuoteResult.OutputAmount"/> only on full fill — see <see cref="QuoteResult"/> for the
+    /// partial-fill contract). The implementation computes the other side.
     /// </param>
     /// <param name="direction">Which side <paramref name="amount"/> pins.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
