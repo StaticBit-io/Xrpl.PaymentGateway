@@ -46,6 +46,16 @@ public sealed class QuoteOptions
     /// <summary>How many queued valuations are processed, and how many delivered, per pass.</summary>
     public int ValuationBatchSize { get; set; } = 50;
 
+    /// <summary>How long a single enqueue write to the quote store may run before it is abandoned.</summary>
+    /// <remarks>
+    /// This bounds <c>ValuationEnqueuer.EnqueueAsync</c>, which runs on the payment path between a payment
+    /// being stored and its receipt being announced. <see cref="IQuoteStore"/> is host-implemented, and a
+    /// store that hangs must not stall that path — nothing about liquidity may delay money arriving. A
+    /// timeout here is treated exactly like any other store failure: logged, swallowed, and reconciliation
+    /// re-offers the payment later.
+    /// </remarks>
+    public TimeSpan EnqueueTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
     /// <summary>How often the valuation queue is drained.</summary>
     /// <remarks>
     /// Much shorter than <see cref="RefreshInterval"/> on purpose: a payment should be priced within

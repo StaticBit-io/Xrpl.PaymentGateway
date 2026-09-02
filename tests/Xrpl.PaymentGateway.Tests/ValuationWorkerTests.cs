@@ -55,7 +55,11 @@ public class ValuationWorkerTests
 
             Registry = new QuoteRegistry(Options.Pairs);
             Enqueuer = new ValuationEnqueuer(
-                QuoteStore, Registry, new FixedTimeProvider(Now), NullLogger.Instance);
+                Microsoft.Extensions.Options.Options.Create(Options),
+                QuoteStore,
+                Registry,
+                new FixedTimeProvider(Now),
+                NullLogger.Instance);
 
             // The worker can be pointed at a decorator (e.g. one that fails a chosen write) while the
             // enqueuer and every assertion still go through the plain in-memory store underneath it.

@@ -36,6 +36,7 @@ public static class QuoteServiceCollectionExtensions
             new QuoteRegistry(provider.GetRequiredService<IOptions<QuoteOptions>>().Value.Pairs));
 
         services.TryAddSingleton(provider => new ValuationEnqueuer(
+            provider.GetRequiredService<IOptions<QuoteOptions>>(),
             provider.GetRequiredService<IQuoteStore>(),
             provider.GetRequiredService<QuoteRegistry>(),
             provider.GetRequiredService<TimeProvider>(),

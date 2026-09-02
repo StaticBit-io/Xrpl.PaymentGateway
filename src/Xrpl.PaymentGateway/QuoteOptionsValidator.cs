@@ -66,6 +66,11 @@ public sealed class QuoteOptionsValidator : IValidateOptions<QuoteOptions>
             failures.Add($"{nameof(options.ValuationPollInterval)} must be positive.");
         }
 
+        if (options.EnqueueTimeout <= TimeSpan.Zero)
+        {
+            failures.Add($"{nameof(options.EnqueueTimeout)} must be positive.");
+        }
+
         return failures.Count == 0
             ? ValidateOptionsResult.Success
             : ValidateOptionsResult.Fail(failures);
