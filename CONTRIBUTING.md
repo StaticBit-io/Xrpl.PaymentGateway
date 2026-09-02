@@ -74,6 +74,23 @@ public class MyStoreTests : PaymentStoreContract
 }
 ```
 
+## Add a quote store
+
+`IQuoteStore` has one hard requirement: `TryEnqueueValuationAsync` must enforce uniqueness
+of the transaction hash and return `false` rather than throw, because live processing,
+catch-up and reconciliation all offer the same payment.
+
+Prove a new store by deriving its test class from `QuoteStoreContract` and implementing
+`CreateAsync`. Override `ReopenAsync` when the store survives a restart.
+
+```csharp
+public class MyQuoteStoreTests : QuoteStoreContract
+{
+    protected override Task<IQuoteStore> CreateAsync() =>
+        Task.FromResult<IQuoteStore>(new MyQuoteStore());
+}
+```
+
 ## Code style
 
 Follow what the surrounding code already does:
