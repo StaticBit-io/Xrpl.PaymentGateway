@@ -31,6 +31,17 @@ public sealed class QuoteHealthReport
     public required int UndeliveredValuations { get; init; }
 
     /// <summary>
+    /// Age of the oldest undelivered valuation, or null when nothing is waiting on delivery.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="UndeliveredValuations"/> saturates at the batch size, so a host whose
+    /// <c>IPaymentValuedHandler</c> is permanently broken can look like a queue that is draining even
+    /// though nothing has left it in hours. The age does not saturate, which is what makes it the field
+    /// to alert on.
+    /// </remarks>
+    public TimeSpan? OldestUndeliveredAge { get; init; }
+
+    /// <summary>
     /// Whether a full refresh cycle fits inside the configured interval.
     /// </summary>
     /// <remarks>False means pairs refresh slower than configured; add fewer pairs or a longer interval.</remarks>

@@ -2,7 +2,7 @@
   <PropertyGroup>
     <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
     <PackageId>Xrpl.PaymentGateway.Postgres</PackageId>
-    <Description>A PostgreSQL IPaymentStore for Xrpl.PaymentGateway: durable payment records, atomic destination tag allocation and the ledger cursor.</Description>
+    <Description>PostgreSQL storage for Xrpl.PaymentGateway: an IPaymentStore with durable payment records, atomic destination tag allocation and the ledger cursor, plus an IQuoteStore for quote readings and payment valuations.</Description>
   </PropertyGroup>
 
   <ItemGroup>

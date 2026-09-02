@@ -109,10 +109,14 @@ public class QuotedPaymentTests
             Assert.True(valuation.FullyFilled);
             Assert.NotNull(valuation.SnapshotLedgerIndex);
 
-            // Ten tokens into a 1000/500 pool: a little under five XRP, and strictly less than the
-            // marginal price would suggest, because pushing size through a pool costs something.
+            // Ten tokens into a 1000/500 pool at the pool's 0.5% trading fee is deterministic: effective
+            // input 10 * (1 - 0.005) = 9.95, output = 9.95 * 500 / (1000 + 9.95) ~= 4.925986. Nothing
+            // else touches the pool between the snapshot and this payment, so that value should come back
+            // almost exactly — this band only needs to cover incidental decimal-rounding slack, not real
+            // variance. It is still an order of magnitude tighter than a plain (4, 5): a bug that dropped
+            // the fee entirely would price this at 10 * 500 / 1010 ~= 4.9505, comfortably outside it.
             Assert.NotNull(valuation.QuoteAmount);
-            Assert.InRange(valuation.QuoteAmount.Value, 4m, 5m);
+            Assert.InRange(valuation.QuoteAmount.Value, 4.90m, 4.95m);
             Assert.True(valuation.SlippagePercent > 0m, "pushing size through a pool must cost something");
 
             QuoteHealthReport health = await host.Services

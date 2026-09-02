@@ -66,6 +66,7 @@ internal sealed class QuoteHealth : IQuoteHealth
         int pending = 0;
         TimeSpan? oldestPendingAge = null;
         int undelivered = 0;
+        TimeSpan? oldestUndeliveredAge = null;
         bool storeReadable = true;
 
         try
@@ -94,9 +95,14 @@ internal sealed class QuoteHealth : IQuoteHealth
                 oldestPendingAge = now - queued[0].EnqueuedAt;
             }
 
-            undelivered = (await _store
+            IReadOnlyList<PaymentValuation> undeliveredEntries = await _store
                 .GetUndeliveredValuationsAsync(_options.ValuationBatchSize, cancellationToken)
-                .ConfigureAwait(false)).Count;
+                .ConfigureAwait(false);
+            undelivered = undeliveredEntries.Count;
+            if (undeliveredEntries.Count > 0)
+            {
+                oldestUndeliveredAge = now - undeliveredEntries[0].EnqueuedAt;
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -122,6 +128,7 @@ internal sealed class QuoteHealth : IQuoteHealth
             PendingValuations = pending,
             OldestPendingAge = oldestPendingAge,
             UndeliveredValuations = undelivered,
+            OldestUndeliveredAge = oldestUndeliveredAge,
             CycleFitsInInterval = QuoteSchedule.CycleFitsInInterval(
                 _registry.Pairs.Count, _options.RefreshInterval, _options.MinimumPairStagger),
             StoreReadable = storeReadable,
