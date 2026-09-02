@@ -1,3 +1,4 @@
+using System.Globalization;
 using Xrpl.Client;
 using Xrpl.Models.Common;
 using Xrpl.Models.Methods;
@@ -206,6 +207,35 @@ public static class StandaloneFixture
         }
 
         await Task.Delay(TimeSpan.FromSeconds(6));
+    }
+
+    /// <summary>
+    /// Creates an AMM pool holding an issued currency and XRP, funded by <paramref name="creator"/>.
+    /// </summary>
+    /// <remarks>The creator must already hold the token; AMMCreate deposits both sides.</remarks>
+    public static async Task CreateAmmAsync(
+        XrplClient client,
+        XrplWallet creator,
+        string currency,
+        string issuer,
+        decimal tokenAmount,
+        decimal xrpAmount,
+        uint tradingFee = 500)
+    {
+        AMMCreate create = new AMMCreate
+        {
+            Account = creator.ClassicAddress,
+            Amount = new Currency
+            {
+                CurrencyCode = currency,
+                Issuer = issuer,
+                Value = tokenAmount.ToString(CultureInfo.InvariantCulture),
+            },
+            Amount2 = new Currency { ValueAsXrp = xrpAmount },
+            TradingFee = tradingFee,
+        };
+
+        await SubmitAndWaitAsync(client, create, creator, $"creating an AMM pool for {currency}/{issuer}");
     }
 
     /// <summary>The node's current validated ledger index.</summary>
