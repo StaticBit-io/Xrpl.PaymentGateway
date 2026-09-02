@@ -26,6 +26,10 @@ public sealed class QuoteView
     /// <remarks>Only ever true when the host turned <c>RefuseStaleQuotes</c> off.</remarks>
     public required bool IsStale { get; init; }
 
-    /// <summary>The priced amount, or null when only the marginal price was asked for.</summary>
+    /// <summary>
+    /// The priced amount. Null in two cases: when only the marginal price was asked for (no amount
+    /// passed), or when an amount was asked for but the snapshot answered "no liquidity" — the same
+    /// condition that leaves <see cref="MarginalPrice"/> null.
+    /// </summary>
     public QuoteResult? Result { get; init; }
 }

@@ -54,8 +54,17 @@ public sealed class QuoteHealthReport
     /// True only when every pair holds a fresh reading, nothing is failing, and the store answered.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// A queue with work in it is not unhealthy: valuations are expected to lag by design. A queue that
     /// stops draining shows up as a growing <see cref="OldestPendingAge"/>, which is the number to alert on.
+    /// </para>
+    /// <para>
+    /// A pair with genuinely no liquidity also reads as unhealthy: the collector correctly clears its
+    /// cached snapshot on an empty capture, so that pair never counts toward
+    /// <see cref="PairsWithFreshQuote"/> and <see cref="ConfiguredPairs"/> stays higher than it. This is
+    /// defensible — there is really nothing to price — but an operator reading a false <c>IsHealthy</c>
+    /// without this context will read it as a failure to investigate rather than a market fact.
+    /// </para>
     /// </remarks>
     public bool IsHealthy =>
         StoreReadable && PairsFailing == 0 && ConfiguredPairs > 0 && PairsWithFreshQuote == ConfiguredPairs;
