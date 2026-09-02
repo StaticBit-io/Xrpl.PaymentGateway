@@ -1,4 +1,3 @@
-using System.Text.RegularExpressions;
 using Npgsql;
 using Xrpl.PaymentGateway.Abstractions;
 
@@ -16,8 +15,6 @@ namespace Xrpl.PaymentGateway.Postgres;
 /// </remarks>
 public sealed class PostgresPaymentStore : IPaymentStore
 {
-    private static readonly Regex SchemaName = new Regex("^[A-Za-z_][A-Za-z0-9_]{0,62}$", RegexOptions.Compiled);
-
     private readonly string _connectionString;
     private readonly string _schema;
     private readonly uint _firstDestinationTag;
@@ -34,13 +31,7 @@ public sealed class PostgresPaymentStore : IPaymentStore
     public PostgresPaymentStore(string connectionString, string schema = "xrpl_payment_gateway", uint firstDestinationTag = 1)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
-        ArgumentException.ThrowIfNullOrWhiteSpace(schema);
-        if (!SchemaName.IsMatch(schema))
-        {
-            // The schema name is an identifier, so it is quoted into every statement rather than passed
-            // as a parameter. Rejecting anything that is not a plain identifier keeps that safe.
-            throw new ArgumentException($"schema \"{schema}\" must be a plain SQL identifier: a letter or underscore followed by letters, digits or underscores.", nameof(schema));
-        }
+        SchemaName.Validate(schema, nameof(schema));
         if (firstDestinationTag == 0)
         {
             throw new ArgumentOutOfRangeException(nameof(firstDestinationTag), "destination tag 0 is not issued");
