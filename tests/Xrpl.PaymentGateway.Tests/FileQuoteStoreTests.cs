@@ -23,7 +23,7 @@ public class FileQuoteStoreTests : QuoteStoreContract, IDisposable
     }
 
     [Fact]
-    public void AFileThatDoesNotExistYetIsAnEmptyStoreRatherThanAnError()
+    public async Task AFileThatDoesNotExistYetIsAnEmptyStoreRatherThanAnError()
     {
         string path = Path.Combine(Path.GetTempPath(), $"xrplpg-quotes-{Guid.NewGuid():N}.json");
         _paths.Add(path);
@@ -31,7 +31,7 @@ public class FileQuoteStoreTests : QuoteStoreContract, IDisposable
         FileQuoteStore store = Track(new FileQuoteStore(path));
 
         Assert.False(File.Exists(path));
-        Assert.Empty(store.GetQuotesAsync(TestContext.Current.CancellationToken).GetAwaiter().GetResult());
+        Assert.Empty(await store.GetQuotesAsync(TestContext.Current.CancellationToken));
     }
 
     private FileQuoteStore Track(FileQuoteStore store)
