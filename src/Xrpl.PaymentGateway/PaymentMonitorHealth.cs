@@ -34,14 +34,15 @@ internal sealed class PaymentMonitorHealth : IPaymentMonitorHealth
         MonitorSnapshot snapshot,
         IXrplNodeConnectionFactory connectionFactory,
         ILogger<PaymentMonitorHealth> logger,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        ValuationEnqueuer? valuationEnqueuer = null)
     {
         _options = options.Value;
         _store = store;
         _snapshot = snapshot;
         _connectionFactory = connectionFactory;
         _logger = logger;
-        _dispatcher = new PaymentDispatcher(store, handler, logger);
+        _dispatcher = new PaymentDispatcher(store, handler, logger, valuationEnqueuer);
         _processor = new TransactionProcessor(_options.Address, timeProvider, logger);
         _catchUp = new CatchUpRunner(logger);
     }
