@@ -127,7 +127,21 @@ internal sealed class ValuationWorker : BackgroundService
                 continue;
             }
 
-            await _quotes.SaveValuationAsync(Complete(entry, result, snapshot), stoppingToken).ConfigureAwait(false);
+            try
+            {
+                await _quotes.SaveValuationAsync(Complete(entry, result, snapshot), stoppingToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Same failure class the evaluation catch above guards against, one line later: a store
+                // that rejects this particular write (a decimal a column cannot hold, say) must not stop
+                // the payment behind it from being reached.
+                _logger.LogError(ex, "saving the valuation of {Hash} failed; it stays queued", entry.TransactionHash);
+            }
         }
     }
 
