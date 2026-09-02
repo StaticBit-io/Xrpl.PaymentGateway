@@ -103,4 +103,13 @@ public class QuoteOptionsValidatorTests
 
         Assert.Contains("ValuationPollInterval", Validate(options).FailureMessage, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void ANonPositiveEnqueueTimeoutFails()
+    {
+        QuoteOptions options = Valid();
+        options.EnqueueTimeout = TimeSpan.Zero;
+
+        Assert.Contains("EnqueueTimeout", Validate(options).FailureMessage, StringComparison.Ordinal);
+    }
 }
