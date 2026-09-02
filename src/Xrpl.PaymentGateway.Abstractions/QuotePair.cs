@@ -4,11 +4,23 @@ namespace Xrpl.PaymentGateway.Abstractions;
 /// An asset the gateway receives, and the asset its value is expressed in.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Validation happens here rather than at first use: a pair that names an issued currency without an
 /// issuer, or XRP with one, addresses nothing on the ledger, and finding that out during a background
 /// refresh means finding it out where nobody is looking.
+/// </para>
+/// <para>
+/// A sealed class rather than a record — matching <see cref="StoredQuote"/>, <see cref="PaymentValuation"/>,
+/// <see cref="QuoteResult"/> and <see cref="QuoteView"/>, and the 1.0.0 <c>PaymentRecord</c> convention
+/// they follow. It also avoids a trap a record would set here: compiler-generated record equality compares
+/// every field, including <see cref="Currency"/> and <see cref="QuoteCurrency"/> exactly as configured, so
+/// the readable and hex spellings of one asset — which <see cref="Key"/> deliberately treats as the same
+/// pair — would compare unequal and silently duplicate in, say, a <see cref="System.Collections.Generic.HashSet{T}"/>.
+/// <see cref="Equals(QuotePair?)"/> and <see cref="GetHashCode"/> are written explicitly against
+/// <see cref="Key"/> instead, so equality agrees with the field that is actually the stable identity.
+/// </para>
 /// </remarks>
-public sealed record QuotePair
+public sealed class QuotePair : IEquatable<QuotePair>
 {
     /// <param name="currency">Received asset's currency code, readable or hex.</param>
     /// <param name="issuer">Received asset's issuer. Null only for XRP.</param>
@@ -75,4 +87,20 @@ public sealed record QuotePair
             throw new ArgumentException($"currency \"{canonical}\" needs an issuer", parameterName);
         }
     }
+
+    /// <summary>Value equality by <see cref="Key"/> — see the type remarks for why this is written by hand.</summary>
+    public bool Equals(QuotePair? other) =>
+        other is not null
+        && (ReferenceEquals(this, other) || string.Equals(Key, other.Key, StringComparison.Ordinal));
+
+    /// <inheritdoc cref="Equals(QuotePair?)"/>
+    public override bool Equals(object? obj) => Equals(obj as QuotePair);
+
+    /// <summary>Hash code derived from <see cref="Key"/>, consistent with <see cref="Equals(QuotePair?)"/>.</summary>
+    public override int GetHashCode() => Key.GetHashCode(StringComparison.Ordinal);
+
+    public static bool operator ==(QuotePair? left, QuotePair? right) =>
+        left is null ? right is null : left.Equals(right);
+
+    public static bool operator !=(QuotePair? left, QuotePair? right) => !(left == right);
 }
