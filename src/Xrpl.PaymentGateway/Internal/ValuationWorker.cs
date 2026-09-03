@@ -10,15 +10,16 @@ namespace Xrpl.PaymentGateway.Internal;
 /// </summary>
 /// <remarks>
 /// Runs behind the payment path, never on it. The pending queue is per pair: for each configured pair this
-/// worker decides whether it can price at all — a snapshot exists and, when required, is fresh — before
-/// ever asking the store for that pair's entries, so a pair with no usable snapshot costs only its own
-/// payments a delay and nothing to the pairs behind it. A payment that cannot be priced for a transient,
-/// pair-wide reason — no snapshot yet, a stale one, the snapshot answering "no liquidity right now", or the
-/// store rejecting the write that would move it on — simply stays queued: the money is already recorded
-/// and its receipt already announced, so waiting costs nothing but a later number. A payment that cannot be
-/// priced for a per-entry, non-transient reason — its pair is gone, or pricing it threw — is moved to
-/// <see cref="ValuationState.Failed"/> instead of retried forever: see <see cref="ValuePendingAsync"/> and
-/// <see cref="IFailedValuationAdmin"/>, the operator path a failed entry then waits on.
+/// worker reads that pair's queued entries first and captures or looks up a snapshot for it only when there
+/// is something queued to price, so a pair with nothing outstanding costs nothing here and a pair with no
+/// usable snapshot costs only its own payments a delay, not the pairs behind it. A payment that cannot be
+/// priced for a transient, pair-wide reason — no snapshot yet, a stale one, the snapshot answering "no
+/// liquidity right now", or the store rejecting the write that would move it on — simply stays queued: the
+/// money is already recorded and its receipt already announced, so waiting costs nothing but a later
+/// number. A payment that cannot be priced for a per-entry, non-transient reason — its pair is gone, or
+/// pricing it threw — is moved to <see cref="ValuationState.Failed"/> instead of retried forever: see
+/// <see cref="ValuePendingAsync"/> and <see cref="IUnresolvedValuationAdmin"/>, the operator path such an
+/// entry then waits on alongside one still stuck <see cref="ValuationState.Pending"/>.
 /// </remarks>
 internal sealed class ValuationWorker : BackgroundService
 {
@@ -113,14 +114,46 @@ internal sealed class ValuationWorker : BackgroundService
     }
 
     /// <summary>
-    /// Prices one configured pair's pending entries, having already decided this pass can price the pair
-    /// at all — no snapshot, or a stale one with <see cref="QuoteOptions.RefuseStaleQuotes"/> set, means the
-    /// whole pair is skipped this pass without ever asking the store for its entries.
+    /// Prices one configured pair's pending entries. Reads the pending queue first: with nothing queued
+    /// there is nothing to price, and neither a cached snapshot nor a fresh capture is worth spending on
+    /// it — a pair that sits idle between payments must not cost a capture every poll regardless.
     /// </summary>
     private async Task ValuePendingForPairAsync(QuotePair pair, CancellationToken stoppingToken)
     {
-        IQuoteSnapshot? snapshot = await SnapshotForAsync(pair, stoppingToken).ConfigureAwait(false);
-        if (snapshot is null)
+        IReadOnlyList<PaymentValuation> pending = await _quotes
+            .GetPendingValuationsAsync(pair.Key, _options.ValuationBatchSize, stoppingToken)
+            .ConfigureAwait(false);
+
+        if (pending.Count == 0)
+        {
+            return;
+        }
+
+        if (_options.ValuateWithFreshSnapshot)
+        {
+            // The documented cost of this option is one capture per payment, not one per pair per pass:
+            // pricing the whole batch off a single capture would also have every entry in it record the
+            // same snapshot ledger and time, which is not "each payment gets its own capture".
+            foreach (PaymentValuation entry in pending)
+            {
+                stoppingToken.ThrowIfCancellationRequested();
+
+                IQuoteSnapshot? fresh = await CaptureFreshAsync(pair, stoppingToken).ConfigureAwait(false);
+                if (fresh is null)
+                {
+                    // Transient: this attempt captured nothing. The entry stays queued and is tried
+                    // again — with its own fresh capture — next pass.
+                    continue;
+                }
+
+                await PriceAsync(entry, fresh, stoppingToken).ConfigureAwait(false);
+            }
+
+            return;
+        }
+
+        IQuoteSnapshot? cached = _registry.GetSnapshot(pair.Key);
+        if (cached is null)
         {
             // Transient and shared by every entry against this pair: nothing has been captured for it
             // yet, or the last capture failed. Every entry simply stays queued and prices itself once a
@@ -128,21 +161,17 @@ internal sealed class ValuationWorker : BackgroundService
             return;
         }
 
-        if (_timeProvider.GetUtcNow() - snapshot.CapturedAt > _options.EffectiveMaxQuoteAge
+        if (_timeProvider.GetUtcNow() - cached.CapturedAt > _options.EffectiveMaxQuoteAge
             && _options.RefuseStaleQuotes)
         {
             // Transient for the same reason: the next successful refresh clears this on its own.
             return;
         }
 
-        IReadOnlyList<PaymentValuation> pending = await _quotes
-            .GetPendingValuationsAsync(pair.Key, _options.ValuationBatchSize, stoppingToken)
-            .ConfigureAwait(false);
-
         foreach (PaymentValuation entry in pending)
         {
             stoppingToken.ThrowIfCancellationRequested();
-            await PriceAsync(entry, snapshot, stoppingToken).ConfigureAwait(false);
+            await PriceAsync(entry, cached, stoppingToken).ConfigureAwait(false);
         }
     }
 
@@ -179,9 +208,10 @@ internal sealed class ValuationWorker : BackgroundService
             return;
         }
 
+        bool applied;
         try
         {
-            await _quotes.SaveValuationAsync(Complete(entry, result, snapshot), stoppingToken).ConfigureAwait(false);
+            applied = await _quotes.SaveValuationAsync(Complete(entry, result, snapshot), stoppingToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
@@ -194,6 +224,18 @@ internal sealed class ValuationWorker : BackgroundService
             // again next pass; nothing here parks a correctly priced payment in the operator queue over a
             // momentary store blip.
             _logger.LogError(ex, "saving the valuation of {Hash} failed; it stays pending and is retried", entry.TransactionHash);
+            return;
+        }
+
+        if (!applied)
+        {
+            // The row moved on from Pending between being read here and this write reaching the store —
+            // an operator resolved it (writing it off, say) while this pass was pricing it. The freshly
+            // computed price is simply discarded; the operator's resolution is the fact that stands.
+            _logger.LogInformation(
+                "payment {Hash} was resolved by an operator before its automatic valuation could be saved; "
+                + "the operator's resolution stands",
+                entry.TransactionHash);
         }
     }
 
@@ -244,13 +286,13 @@ internal sealed class ValuationWorker : BackgroundService
         }
     }
 
-    private async Task<IQuoteSnapshot?> SnapshotForAsync(QuotePair pair, CancellationToken stoppingToken)
+    /// <summary>
+    /// Captures one fresh snapshot for <paramref name="pair"/>, bounded by <see cref="QuoteOptions.CaptureTimeout"/>.
+    /// Called once per pending entry when <see cref="QuoteOptions.ValuateWithFreshSnapshot"/> is set, never
+    /// once for a whole pending batch — see <see cref="ValuePendingForPairAsync"/>.
+    /// </summary>
+    private async Task<IQuoteSnapshot?> CaptureFreshAsync(QuotePair pair, CancellationToken stoppingToken)
     {
-        if (!_options.ValuateWithFreshSnapshot)
-        {
-            return _registry.GetSnapshot(pair.Key);
-        }
-
         try
         {
             // CancelAfter has no TimeProvider overload; the constructor does. This is what lets an
@@ -295,16 +337,29 @@ internal sealed class ValuationWorker : BackgroundService
                 // call was in flight, the mark must not land on that newer row — see
                 // IQuoteStore.MarkValuationDeliveredAsync. Left undelivered here, the resolved content is
                 // what the very next pass hands to the handler instead.
-                await _quotes
+                bool applied = await _quotes
                     .MarkValuationDeliveredAsync(entry.TransactionHash, entry.State, stoppingToken)
                     .ConfigureAwait(false);
 
-                _logger.LogInformation(
-                    "payment {Hash} reached {State} (quote {Quote}, buyer {Buyer})",
-                    entry.TransactionHash,
-                    entry.State,
-                    entry.QuoteAmount,
-                    buyerId ?? "unknown");
+                if (applied)
+                {
+                    _logger.LogInformation(
+                        "payment {Hash} reached {State} (quote {Quote}, buyer {Buyer})",
+                        entry.TransactionHash,
+                        entry.State,
+                        entry.QuoteAmount,
+                        buyerId ?? "unknown");
+                }
+                else
+                {
+                    // The mark did not apply — the handler was handed content that has since been
+                    // superseded. Not a failure: the resolved row is what the very next pass delivers.
+                    _logger.LogInformation(
+                        "payment {Hash} moved on from {State} before the delivered mark could apply; "
+                        + "the newer content will be redelivered next pass",
+                        entry.TransactionHash,
+                        entry.State);
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {

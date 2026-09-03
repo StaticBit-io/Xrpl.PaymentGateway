@@ -46,7 +46,7 @@ public sealed class QuoteHealthReport
 
     /// <summary>
     /// Entries in <c>ValuationState.Failed</c> right now — the automatic pipeline gave up on them and they
-    /// wait on an operator through <c>IFailedValuationAdmin</c>.
+    /// wait on an operator through <c>IUnresolvedValuationAdmin</c>.
     /// </summary>
     /// <remarks>
     /// A written-off entry is settled and does not count here: this is the queue an operator still has open

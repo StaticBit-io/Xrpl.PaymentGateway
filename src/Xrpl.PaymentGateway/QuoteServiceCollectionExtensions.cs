@@ -13,7 +13,7 @@ public static class QuoteServiceCollectionExtensions
 {
     /// <summary>
     /// Registers the quote collector, the valuation worker, the reader, the health service and the
-    /// failed-valuation admin service.
+    /// unresolved-valuation admin service.
     /// </summary>
     /// <remarks>
     /// Separate from <see cref="ServiceCollectionExtensions.AddXrplPaymentGateway"/> so that a host which
@@ -45,7 +45,7 @@ public static class QuoteServiceCollectionExtensions
 
         services.TryAddSingleton<IQuoteReader, QuoteReader>();
         services.TryAddSingleton<IQuoteHealth, QuoteHealth>();
-        services.TryAddSingleton<IFailedValuationAdmin, FailedValuationAdmin>();
+        services.TryAddSingleton<IUnresolvedValuationAdmin, UnresolvedValuationAdmin>();
 
         // TryAddEnumerable, as with the monitor: calling this twice must not start two collectors
         // hitting the node at double the configured rate.

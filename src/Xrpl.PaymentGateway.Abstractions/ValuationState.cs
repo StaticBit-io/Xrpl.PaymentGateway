@@ -21,7 +21,7 @@ public enum ValuationState
     /// <summary>Priced by the automatic pipeline from a liquidity snapshot.</summary>
     Valued,
 
-    /// <summary>Priced by an operator, through <see cref="IFailedValuationAdmin"/>, at a rate they supplied.</summary>
+    /// <summary>Priced by an operator, through <see cref="IUnresolvedValuationAdmin"/>, at a rate they supplied.</summary>
     ValuedManually,
 
     /// <summary>
@@ -29,13 +29,13 @@ public enum ValuationState
     /// pricing it threw. Both are deterministic — another attempt cannot change either outcome — which is
     /// what distinguishes them from a transient, pair-wide condition like a missing snapshot or "no
     /// liquidity right now", none of which fail an entry; see <see cref="Pending"/>. Never retried
-    /// automatically — see <see cref="IFailedValuationAdmin"/> for the operator path this state waits on.
+    /// automatically — see <see cref="IUnresolvedValuationAdmin"/> for the operator path this state waits on.
     /// </summary>
     Failed,
 
     /// <summary>
     /// Terminal. An operator looked at a <see cref="Failed"/> entry and decided not to credit it at all —
-    /// dust, a spam token, a mistaken transfer — through <see cref="IFailedValuationAdmin"/>.
+    /// dust, a spam token, a mistaken transfer — through <see cref="IUnresolvedValuationAdmin"/>.
     /// </summary>
     WrittenOff,
 }

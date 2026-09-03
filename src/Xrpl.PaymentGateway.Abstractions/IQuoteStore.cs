@@ -61,18 +61,28 @@ public interface IQuoteStore
     /// Replaces a <see cref="ValuationState.Pending"/> or <see cref="ValuationState.Failed"/> entry with its
     /// computed valuation — <see cref="PaymentValuation.State"/> on <paramref name="valuation"/> says which
     /// of <see cref="ValuationState.Valued"/> (the automatic pipeline) or <see cref="ValuationState.ValuedManually"/>
-    /// (an operator, via <see cref="IFailedValuationAdmin"/>) it is. Moving on from
+    /// (an operator, via <see cref="IUnresolvedValuationAdmin"/>) it is. Moving on from
     /// <see cref="ValuationState.Failed"/> clears <see cref="PaymentValuation.FailedAt"/> and
     /// <see cref="PaymentValuation.FailureReason"/> — the entry is resolved now, not failed and valued at
     /// once — and clears <see cref="PaymentValuation.Delivered"/>, since the resolved content is a new fact
-    /// the host has not heard yet even when the failed row it replaces was already delivered.
+    /// the host has not heard yet even when the row it replaces was already delivered. The implementation
+    /// enforces the cleared <see cref="PaymentValuation.Delivered"/> itself rather than trusting
+    /// <paramref name="valuation"/>'s own flag — a caller that builds the replacement by copying an existing
+    /// delivered row, the natural way to preserve its other fields, must not have that copy's flag survive.
     /// </summary>
+    /// <returns>
+    /// Whether the write actually applied. False means the row had already moved on from
+    /// <see cref="ValuationState.Pending"/> or <see cref="ValuationState.Failed"/> by the time this call
+    /// reached the store — another operation resolved it first — and nothing was written. A caller that
+    /// read the row, decided it could act, and now finds this false must not report success: the decision
+    /// was made against a row that no longer exists in the state it was read in.
+    /// </returns>
     /// <remarks>
     /// Only ever replaces an entry that is still <see cref="ValuationState.Pending"/> or
     /// <see cref="ValuationState.Failed"/> — an entry already resolved some other way (an operator's
     /// write-off racing this call, say) is left alone rather than silently overwritten.
     /// </remarks>
-    Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken);
+    Task<bool> SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken);
 
     /// <summary>
     /// Moves a <see cref="ValuationState.Pending"/> entry to <see cref="ValuationState.Failed"/> for good —
@@ -90,27 +100,56 @@ public interface IQuoteStore
         string transactionHash, string reason, DateTimeOffset failedAt, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Moves a <see cref="ValuationState.Failed"/> entry to <see cref="ValuationState.WrittenOff"/> for
-    /// good, at an operator's decision through <see cref="IFailedValuationAdmin"/>. Also clears
-    /// <see cref="PaymentValuation.Delivered"/> — the write-off is a new fact the host has not heard yet
-    /// even when the failed row it replaces was already delivered.
+    /// Moves a <see cref="ValuationState.Pending"/> or <see cref="ValuationState.Failed"/> entry to
+    /// <see cref="ValuationState.WrittenOff"/> for good, at an operator's decision through
+    /// <see cref="IUnresolvedValuationAdmin"/>. Also clears <see cref="PaymentValuation.Delivered"/> — the
+    /// write-off is a new fact the host has not heard yet even when the row it replaces was already
+    /// delivered.
     /// </summary>
-    Task SaveWriteOffAsync(
+    /// <returns>
+    /// Whether the write actually applied. False means the row had already moved on from
+    /// <see cref="ValuationState.Pending"/> or <see cref="ValuationState.Failed"/> by the time this call
+    /// reached the store, and nothing was written — see the identical contract on
+    /// <see cref="SaveValuationAsync"/>.
+    /// </returns>
+    Task<bool> SaveWriteOffAsync(
         string transactionHash, string reason, DateTimeOffset writtenOffAt, CancellationToken cancellationToken);
 
     /// <summary>
     /// Up to <paramref name="limit"/> entries in <see cref="ValuationState.Failed"/>, oldest-failed first,
-    /// after skipping <paramref name="offset"/> of them. What <see cref="IFailedValuationAdmin.ListFailedAsync"/>
-    /// pages through.
+    /// after skipping <paramref name="offset"/> of them. What a health report's failed-entry count is drawn
+    /// from; see <see cref="CountFailedValuationsAsync"/>.
     /// </summary>
     Task<IReadOnlyList<PaymentValuation>> GetFailedValuationsAsync(
         int limit, int offset, CancellationToken cancellationToken);
 
     /// <summary>
-    /// How many entries are in <see cref="ValuationState.Failed"/> right now — the count an admin screen or
-    /// a health report wants without paging through the whole list.
+    /// How many entries are in <see cref="ValuationState.Failed"/> right now — the count a health report
+    /// wants without paging through the whole list.
     /// </summary>
     Task<int> CountFailedValuationsAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Up to <paramref name="limit"/> entries in <see cref="ValuationState.Pending"/> or
+    /// <see cref="ValuationState.Failed"/> whose <see cref="PaymentValuation.EnqueuedAt"/> is at or before
+    /// <paramref name="olderThan"/>, oldest-enqueued first, after skipping <paramref name="offset"/> of
+    /// them. What <see cref="IUnresolvedValuationAdmin.ListUnresolvedAsync"/> pages through.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="PaymentValuation.EnqueuedAt"/> is the one timestamp every unresolved entry has — a
+    /// <see cref="ValuationState.Pending"/> row has no <see cref="PaymentValuation.FailedAt"/> to sort by —
+    /// so it is what "stuck" is measured against for both states alike: how long the entry has been in the
+    /// pipeline without reaching a resolved or terminal state, not how long since any one state transition.
+    /// </remarks>
+    Task<IReadOnlyList<PaymentValuation>> GetUnresolvedValuationsAsync(
+        DateTimeOffset olderThan, int limit, int offset, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// How many entries are in <see cref="ValuationState.Pending"/> or <see cref="ValuationState.Failed"/>
+    /// with <see cref="PaymentValuation.EnqueuedAt"/> at or before <paramref name="olderThan"/> right now —
+    /// the count <see cref="IUnresolvedValuationAdmin.ListUnresolvedAsync"/> paginates against.
+    /// </summary>
+    Task<int> CountUnresolvedValuationsAsync(DateTimeOffset olderThan, CancellationToken cancellationToken);
 
     /// <summary>
     /// Up to <paramref name="limit"/> entries past <see cref="ValuationState.Pending"/> that have not
@@ -134,7 +173,13 @@ public interface IQuoteStore
     /// <param name="transactionHash">The entry to mark delivered.</param>
     /// <param name="deliveredState">The state that was actually handed to the host handler.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    Task MarkValuationDeliveredAsync(
+    /// <returns>
+    /// Whether the mark actually applied. False means the row had already moved on from
+    /// <paramref name="deliveredState"/> — the resolution race this method exists to guard against — and
+    /// the caller should not treat the delivery as recorded; the next pass hands the resolved content to
+    /// the handler instead.
+    /// </returns>
+    Task<bool> MarkValuationDeliveredAsync(
         string transactionHash, ValuationState deliveredState, CancellationToken cancellationToken);
 
     /// <summary>The valuation for one payment, in any state, or null when there is none.</summary>

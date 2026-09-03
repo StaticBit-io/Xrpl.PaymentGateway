@@ -20,7 +20,7 @@ namespace Xrpl.PaymentGateway.Abstractions;
 /// <para>
 /// A <c>valuation</c> here is not always priced. Its <see cref="PaymentValuation.State"/> can
 /// be <see cref="ValuationState.Failed"/> — the automatic pipeline could not price it and it now waits on
-/// an operator, see <see cref="IFailedValuationAdmin"/> — or <see cref="ValuationState.WrittenOff"/> — an
+/// an operator, see <see cref="IUnresolvedValuationAdmin"/> — or <see cref="ValuationState.WrittenOff"/> — an
 /// operator looked at it and decided it will never be credited. Both carry
 /// <see cref="PaymentValuation.FailureReason"/> and no <see cref="PaymentValuation.QuoteAmount"/>. This is
 /// how a host learns to tell the buyer that funds arrived but could not be valued (<c>Failed</c>) or that

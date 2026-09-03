@@ -168,7 +168,7 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
         }
     }
 
-    public async Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken)
+    public async Task<bool> SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(valuation);
 
@@ -179,7 +179,7 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
                 v => string.Equals(v.TransactionHash, valuation.TransactionHash, StringComparison.Ordinal));
             if (index < 0)
             {
-                return;
+                return false;
             }
 
             PaymentValuation previous = _state.Valuations[index];
@@ -188,12 +188,15 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
             // is left alone rather than silently overwritten.
             if (previous.State is not (ValuationState.Pending or ValuationState.Failed))
             {
-                return;
+                return false;
             }
 
             // A whole-object replace: a caller moving an entry on from Failed simply builds the new
             // Valued/ValuedManually valuation without FailedAt/FailureReason set, which is what clears them.
-            _state.Valuations[index] = valuation;
+            // Delivered is enforced here rather than trusted from valuation itself: a caller that builds
+            // the replacement by copying an existing delivered row — the natural way to carry its other
+            // fields forward — must not have that copy's flag survive into the resolved row.
+            _state.Valuations[index] = valuation.Delivered ? WithDeliveredCleared(valuation) : valuation;
 
             try
             {
@@ -206,6 +209,8 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
                 _state.Valuations[index] = previous;
                 throw;
             }
+
+            return true;
         }
         finally
         {
@@ -248,7 +253,7 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
         }
     }
 
-    public async Task SaveWriteOffAsync(
+    public async Task<bool> SaveWriteOffAsync(
         string transactionHash, string reason, DateTimeOffset writtenOffAt, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(transactionHash);
@@ -259,9 +264,9 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
         {
             int index = _state.Valuations.FindIndex(
                 v => string.Equals(v.TransactionHash, transactionHash, StringComparison.Ordinal));
-            if (index < 0 || _state.Valuations[index].State != ValuationState.Failed)
+            if (index < 0 || _state.Valuations[index].State is not (ValuationState.Pending or ValuationState.Failed))
             {
-                return;
+                return false;
             }
 
             PaymentValuation previous = _state.Valuations[index];
@@ -276,6 +281,8 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
                 _state.Valuations[index] = previous;
                 throw;
             }
+
+            return true;
         }
         finally
         {
@@ -321,10 +328,50 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
         }
     }
 
+    public async Task<IReadOnlyList<PaymentValuation>> GetUnresolvedValuationsAsync(
+        DateTimeOffset olderThan, int limit, int offset, CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            // _state.Valuations is already in enqueue order (append-only), so a stable OrderBy over it
+            // makes ties on EnqueuedAt fall back to enqueue order — matching PostgresQuoteStore's
+            // "ORDER BY enqueued_at, queued_seq".
+            return _state.Valuations
+                .Where(entry => entry.State is ValuationState.Pending or ValuationState.Failed
+                    && entry.EnqueuedAt <= olderThan)
+                .OrderBy(entry => entry.EnqueuedAt)
+                .Skip(offset)
+                .Take(limit)
+                .ToList();
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<int> CountUnresolvedValuationsAsync(DateTimeOffset olderThan, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return _state.Valuations.Count(
+                entry => entry.State is ValuationState.Pending or ValuationState.Failed && entry.EnqueuedAt <= olderThan);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) =>
         TakeAsync(limit, entry => entry.State != ValuationState.Pending && !entry.Delivered, cancellationToken);
 
-    public async Task MarkValuationDeliveredAsync(
+    public async Task<bool> MarkValuationDeliveredAsync(
         string transactionHash, ValuationState deliveredState, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(transactionHash);
@@ -340,7 +387,7 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
             // never reach the host. Left alone here, the row stays undelivered for the next pass.
             if (index < 0 || _state.Valuations[index].State != deliveredState)
             {
-                return;
+                return false;
             }
 
             PaymentValuation previous = _state.Valuations[index];
@@ -355,6 +402,8 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
                 _state.Valuations[index] = previous;
                 throw;
             }
+
+            return true;
         }
         finally
         {
@@ -433,6 +482,33 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
         WrittenOffAt = entry.WrittenOffAt,
         WriteOffReason = entry.WriteOffReason,
         Delivered = true,
+    };
+
+    /// <summary>A copy of <paramref name="valuation"/> with <see cref="PaymentValuation.Delivered"/> forced false.</summary>
+    private static PaymentValuation WithDeliveredCleared(PaymentValuation valuation) => new PaymentValuation
+    {
+        TransactionHash = valuation.TransactionHash,
+        PairKey = valuation.PairKey,
+        Amount = valuation.Amount,
+        PaymentLedgerIndex = valuation.PaymentLedgerIndex,
+        DestinationTag = valuation.DestinationTag,
+        EnqueuedAt = valuation.EnqueuedAt,
+        State = valuation.State,
+        ValuedAt = valuation.ValuedAt,
+        QuoteAmount = valuation.QuoteAmount,
+        EffectivePrice = valuation.EffectivePrice,
+        MarginalPrice = valuation.MarginalPrice,
+        SlippagePercent = valuation.SlippagePercent,
+        FullyFilled = valuation.FullyFilled,
+        BookTruncated = valuation.BookTruncated,
+        Route = valuation.Route,
+        SnapshotLedgerIndex = valuation.SnapshotLedgerIndex,
+        SnapshotCapturedAt = valuation.SnapshotCapturedAt,
+        FailedAt = valuation.FailedAt,
+        FailureReason = valuation.FailureReason,
+        WrittenOffAt = valuation.WrittenOffAt,
+        WriteOffReason = valuation.WriteOffReason,
+        Delivered = false,
     };
 
     private static PaymentValuation WithFailure(PaymentValuation entry, string reason, DateTimeOffset failedAt) => new PaymentValuation
