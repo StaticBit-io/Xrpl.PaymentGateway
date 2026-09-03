@@ -98,6 +98,7 @@ public class FileQuoteStoreTests : QuoteStoreContract, IDisposable
         Amount = pending.Amount,
         PaymentLedgerIndex = pending.PaymentLedgerIndex,
         EnqueuedAt = pending.EnqueuedAt,
+        State = ValuationState.Valued,
         ValuedAt = new DateTimeOffset(2026, 8, 30, 12, 0, 30, TimeSpan.Zero),
         QuoteAmount = 9.9m,
     };

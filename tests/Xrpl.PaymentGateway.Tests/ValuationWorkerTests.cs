@@ -179,21 +179,25 @@ public class ValuationWorkerTests
     }
 
     [Fact]
-    public async Task ANoLiquidityAnswerLeavesThePaymentQueuedRatherThanValuingItAtNothing()
+    public async Task ANoLiquidityAnswerFailsTheEntryRatherThanLeavingItQueuedForever()
     {
         // The snapshot is fresh and present — this is not the "nothing captured yet" or "stale" case
-        // covered elsewhere — but EvaluateAsync itself reports no liquidity, which ValuePendingAsync must
-        // treat the same way as not having a usable snapshot at all: leave the entry queued for the next
-        // pass rather than manufacturing a zero valuation.
+        // covered elsewhere — but EvaluateAsync itself reports no liquidity. That is a per-entry,
+        // non-transient cause: nothing here retries automatically on a timer, so ValuePendingAsync must
+        // fail the entry — leaving the queue for good and waiting on an operator — rather than leaving it
+        // pending forever or manufacturing a zero valuation.
         await using Harness harness = new Harness();
         harness.Registry.SetSnapshot(Xpm.Key, new NoLiquiditySnapshot(capturedAt: Now));
         await harness.Enqueuer.EnqueueAsync(Payment(), Ct);
 
         await harness.StartAsync();
-        await Task.Delay(200, Ct);
+        await TestWait.UntilAsync(() => harness.Handler.Deliveries.Count == 1, "the failed valuation to be delivered");
 
-        Assert.Empty(harness.Handler.Deliveries);
-        Assert.Single(await harness.QuoteStore.GetPendingValuationsAsync(10, Ct));
+        Assert.Empty(await harness.QuoteStore.GetPendingValuationsAsync(10, Ct));
+        PaymentValuation valuation = harness.Handler.Deliveries[0].Valuation;
+        Assert.Equal(ValuationState.Failed, valuation.State);
+        Assert.Null(valuation.QuoteAmount);
+        Assert.Contains("no liquidity", valuation.FailureReason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -276,13 +280,14 @@ public class ValuationWorkerTests
     }
 
     [Fact]
-    public async Task AnEvaluationThatThrowsDoesNotStarveTheEntryBehindIt()
+    public async Task AnEvaluationThatThrowsFailsTheEntryRatherThanStarvingTheOneBehindIt()
     {
         // Metadata is written by whoever built the payment; an amount decimal cannot hold must not wedge
-        // the queue the way it once wedged the monitor. GetPendingValuationsAsync is oldest-first, so a
-        // poisoned entry that never becomes valued sits permanently at the head — the only way to prove
-        // the entry behind it still gets reached is a mixed batch: one pair whose snapshot always throws,
-        // queued first, and a second, healthy pair queued behind it.
+        // the queue the way it once wedged the monitor. Pricing that throws is deterministic and per-entry
+        // — the same amount against the same snapshot throws the same way every time — so the entry is
+        // failed rather than left pending. The only way to prove the entry behind it still gets reached in
+        // the same pass is a mixed batch: one pair whose snapshot always throws, queued first, and a
+        // second, healthy pair queued behind it.
         await using Harness harness = new Harness(configure: options => options.Pairs = new[] { Xpm, Bar });
         harness.Registry.SetSnapshot(Xpm.Key, new ThrowingQuoteSnapshot(Now));
         harness.Registry.SetSnapshot(Bar.Key, new StubQuoteSnapshot(price: 0.02m, ledgerIndex: 900, capturedAt: Now));
@@ -292,23 +297,24 @@ public class ValuationWorkerTests
 
         await harness.StartAsync();
         await TestWait.UntilAsync(
-            () => harness.Handler.Deliveries.Count == 1,
+            () => harness.Handler.Deliveries.Any(d => d.Valuation.TransactionHash == "HEALTHY"),
             "the healthy entry to be valued and delivered despite the poisoned one ahead of it");
 
-        Assert.Equal("HEALTHY", harness.Handler.Deliveries[0].Valuation.TransactionHash);
+        Assert.Empty(await harness.QuoteStore.GetPendingValuationsAsync(10, Ct));
 
-        IReadOnlyList<PaymentValuation> pending = await harness.QuoteStore.GetPendingValuationsAsync(10, Ct);
-        Assert.Single(pending);
-        Assert.Equal("POISON", pending[0].TransactionHash);
+        PaymentValuation? poisoned = await harness.QuoteStore.GetValuationAsync("POISON", Ct);
+        Assert.NotNull(poisoned);
+        Assert.Equal(ValuationState.Failed, poisoned!.State);
+        Assert.Contains("threw", poisoned.FailureReason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public async Task ASaveFailureLeavesTheEntryQueuedWithoutStarvingOthers()
+    public async Task ASaveFailureFailsTheEntryRatherThanStarvingOthers()
     {
         // Same failure class the evaluation guard above protects against, one line later: a store write
         // that throws for one entry (a Postgres column rejecting a decimal that overflows its precision,
-        // say) must not block the payment behind it from being reached, the same way the evaluation guard
-        // must not.
+        // say) will reject it again next pass too, so it is failed rather than left pending — and either
+        // way must not block the payment behind it from being reached.
         await using Harness harness = new Harness(
             configure: options => options.Pairs = new[] { Xpm, Bar },
             wrapQuoteStore: inner => new FlakyQuoteStore(inner, failingHash: "BADSAVE"));
@@ -320,14 +326,76 @@ public class ValuationWorkerTests
 
         await harness.StartAsync();
         await TestWait.UntilAsync(
-            () => harness.Handler.Deliveries.Count == 1,
+            () => harness.Handler.Deliveries.Any(d => d.Valuation.TransactionHash == "GOODSAVE"),
             "the entry behind the failing save to be valued and delivered");
 
-        Assert.Equal("GOODSAVE", harness.Handler.Deliveries[0].Valuation.TransactionHash);
+        Assert.Empty(await harness.QuoteStore.GetPendingValuationsAsync(10, Ct));
 
-        IReadOnlyList<PaymentValuation> pending = await harness.QuoteStore.GetPendingValuationsAsync(10, Ct);
-        Assert.Single(pending);
-        Assert.Equal("BADSAVE", pending[0].TransactionHash);
+        PaymentValuation? badSave = await harness.QuoteStore.GetValuationAsync("BADSAVE", Ct);
+        Assert.NotNull(badSave);
+        Assert.Equal(ValuationState.Failed, badSave!.State);
+        Assert.Contains("store rejected", badSave.FailureReason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task APairRemovedFromConfigurationFailsTheEntryRatherThanLeavingItQueuedForever()
+    {
+        // The pair was removed from configuration after the payment was queued. Nothing will re-add it
+        // behind this worker's back, so the entry is failed rather than retried on a timer forever.
+        await using Harness harness = new Harness();
+        await harness.Enqueuer.EnqueueAsync(Payment(), Ct);
+
+        // Reconfigure the registry to no longer carry Xpm, as if the host redeployed without it. The
+        // harness enqueues against the original Xpm-carrying options, so the entry is already queued.
+        QuoteRegistry emptyRegistry = new QuoteRegistry(Array.Empty<QuotePair>());
+        ValuationWorker worker = new ValuationWorker(
+            Microsoft.Extensions.Options.Options.Create(harness.Options),
+            harness.QuoteStore,
+            harness.PaymentStore,
+            emptyRegistry,
+            new ScriptedQuoteSource(),
+            harness.Handler,
+            new FixedTimeProvider(Now),
+            NullLogger<ValuationWorker>.Instance);
+
+        await worker.StartAsync(CancellationToken.None);
+        try
+        {
+            await TestWait.UntilAsync(() => harness.Handler.Deliveries.Count == 1, "the failed valuation to be delivered");
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+            worker.Dispose();
+        }
+
+        PaymentValuation valuation = harness.Handler.Deliveries[0].Valuation;
+        Assert.Equal(ValuationState.Failed, valuation.State);
+        Assert.Contains("no longer configured", valuation.FailureReason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task AManuallyPricedEntryIsDeliveredThroughTheSameNormalDeliveryPassAsAnAutomaticOne()
+    {
+        // FailedValuationAdmin never calls IPaymentValuedHandler itself: it leaves the resolved row
+        // undelivered, exactly as ValuationWorker leaves a freshly computed automatic one, so this worker's
+        // own delivery pass is what must pick it up — proving the operator path rides the one delivery
+        // mechanism rather than a second one built for it.
+        await using Harness harness = new Harness();
+        Assert.Equal(42u, await harness.PaymentStore.GetOrAssignTagAsync("buyer-42", Ct));
+        await harness.Enqueuer.EnqueueAsync(Payment(), Ct);
+        await harness.QuoteStore.SaveValuationFailureAsync("HASH1", "no liquidity", Now, Ct);
+
+        FailedValuationAdmin admin = new FailedValuationAdmin(harness.QuoteStore, new FixedTimeProvider(Now));
+        await admin.ValueManuallyAsync("HASH1", rate: 0.02m, Ct);
+
+        await harness.StartAsync();
+        await TestWait.UntilAsync(() => harness.Handler.Deliveries.Count == 1, "the manually priced valuation to be delivered");
+
+        (PaymentValuation valuation, string? buyerId) = harness.Handler.Deliveries[0];
+        Assert.Equal("buyer-42", buyerId);
+        Assert.Equal(ValuationState.ValuedManually, valuation.State);
+        Assert.Equal(20m, valuation.QuoteAmount);
     }
 }
 

@@ -154,6 +154,7 @@ public class QuoteHealthTests
                 Amount = 1000m,
                 PaymentLedgerIndex = 901,
                 EnqueuedAt = Now.AddMinutes(-30),
+                State = ValuationState.Valued,
                 ValuedAt = Now.AddMinutes(-29),
                 QuoteAmount = 10m,
             },
@@ -206,14 +207,42 @@ public class QuoteHealthTests
         (QuoteHealth health, InMemoryQuoteStore store, QuoteRegistry registry) = Build();
         await store.SaveQuoteAsync(Quote(), Ct);
         registry.SetSnapshot(Xpm.Key, new StubQuoteSnapshot(capturedAt: Now.AddSeconds(-20)));
-        registry.SetLastWriteSucceeded(false);
+        registry.SetLastWriteSucceeded(Xpm.Key, succeeded: false);
 
         QuoteHealthReport report = await health.CheckAsync(Ct);
 
         Assert.True(report.StoreReadable);
         Assert.Equal(1, report.PairsWithFreshQuote);
+        Assert.Equal(1, report.PairsFailingToPersist);
         Assert.False(report.StoreWritable);
         Assert.False(report.IsHealthy);
+    }
+
+    [Fact]
+    public async Task WritesFailingForOnePairAreNotErasedByAnotherPairsSuccessfulWrite()
+    {
+        // The write-health flag used to be one process-wide last-write-wins boolean: a store rejecting
+        // writes for one pair out of two would be erased by the other pair's success, and the report would
+        // go green while one pair's persistence stayed broken. PairsFailingToPersist is per pair, like
+        // every other count in this report, so it must not be erased that way.
+        QuotePair bar = new QuotePair("BAR", XpmIssuer, "USD", RlusdIssuer);
+        QuoteOptions options = new QuoteOptions
+        {
+            Pairs = new[] { Xpm, bar },
+            RefreshInterval = TimeSpan.FromMinutes(1),
+        };
+        InMemoryQuoteStore store = new InMemoryQuoteStore();
+        QuoteRegistry registry = new QuoteRegistry(options.Pairs);
+        QuoteHealth health = new QuoteHealth(
+            Options.Create(options), store, registry, new FixedTimeProvider(Now), NullLogger<QuoteHealth>.Instance);
+
+        registry.SetLastWriteSucceeded(Xpm.Key, succeeded: false);
+        registry.SetLastWriteSucceeded(bar.Key, succeeded: true);
+
+        QuoteHealthReport report = await health.CheckAsync(Ct);
+
+        Assert.Equal(1, report.PairsFailingToPersist);
+        Assert.False(report.StoreWritable);
     }
 
     [Fact]
@@ -232,6 +261,94 @@ public class QuoteHealthTests
         Assert.False(report.StoreReadable);
         Assert.False(report.IsHealthy);
     }
+
+    [Fact]
+    public async Task AHangingStoreDoesNotBlockTheHealthCheckBeyondItsTimeout()
+    {
+        // QuoteOptions.StoreTimeout's summary claims it bounds the store on every path that must not hang.
+        // CheckAsync makes several store calls of its own — GetQuotesAsync is the first — and used to carry
+        // only the caller's token, so a store that merely hangs would hang the health check with it. A
+        // health check against a hung store must report StoreReadable false, not sit there forever.
+        QuoteOptions options = new QuoteOptions { Pairs = new[] { Xpm }, StoreTimeout = TimeSpan.FromMilliseconds(100) };
+        QuoteHealth health = new QuoteHealth(
+            Options.Create(options),
+            new HangingQuoteStore(),
+            new QuoteRegistry(options.Pairs),
+            TimeProvider.System,
+            NullLogger<QuoteHealth>.Instance);
+
+        DateTime startedAt = DateTime.UtcNow;
+        QuoteHealthReport report = await health.CheckAsync(Ct);
+        TimeSpan elapsed = DateTime.UtcNow - startedAt;
+
+        Assert.False(report.StoreReadable);
+        Assert.False(report.IsHealthy);
+        Assert.True(
+            elapsed < TimeSpan.FromSeconds(3),
+            $"expected the health check to give up near its 100ms StoreTimeout, but it took {elapsed}");
+    }
+
+    [Fact]
+    public async Task FailedValuationsCountsFailedEntriesOnlyNotWrittenOffOnes()
+    {
+        (QuoteHealth health, InMemoryQuoteStore store, _) = Build();
+        await store.TryEnqueueValuationAsync(
+            new PaymentValuation
+            {
+                TransactionHash = "STILL-FAILED",
+                PairKey = Xpm.Key,
+                Amount = 1000m,
+                PaymentLedgerIndex = 901,
+                EnqueuedAt = Now,
+            },
+            Ct);
+        await store.SaveValuationFailureAsync("STILL-FAILED", "the pair currently has no liquidity", Now, Ct);
+
+        await store.TryEnqueueValuationAsync(
+            new PaymentValuation
+            {
+                TransactionHash = "WRITTEN-OFF",
+                PairKey = Xpm.Key,
+                Amount = 1m,
+                PaymentLedgerIndex = 902,
+                EnqueuedAt = Now,
+            },
+            Ct);
+        await store.SaveValuationFailureAsync("WRITTEN-OFF", "the pair currently has no liquidity", Now, Ct);
+        await store.SaveWriteOffAsync("WRITTEN-OFF", "dust", Now, Ct);
+
+        QuoteHealthReport report = await health.CheckAsync(Ct);
+
+        // Settled work must not keep an operator's queue looking non-empty.
+        Assert.Equal(1, report.FailedValuations);
+    }
+
+    [Fact]
+    public async Task LastCycleDurationReportsTheInProgressCycleWhenItAlreadyExceedsTheLastCompletedOne()
+    {
+        // Written only when a cycle finishes, LastCycleDuration used to keep repeating the last good
+        // number for as long as a later cycle stalled — going quiet exactly when a stall is the thing to
+        // notice. A cycle already running longer than the last completed one must be what is reported.
+        (QuoteHealth health, _, QuoteRegistry registry) = Build();
+        registry.SetLastCycleDuration(TimeSpan.FromSeconds(5));
+        registry.SetCycleStarted(Now - TimeSpan.FromSeconds(30));
+
+        QuoteHealthReport report = await health.CheckAsync(Ct);
+
+        Assert.Equal(TimeSpan.FromSeconds(30), report.LastCycleDuration);
+    }
+
+    [Fact]
+    public async Task LastCycleDurationKeepsTheLastCompletedCycleWhileTheNewOneHasNotCaughtUpYet()
+    {
+        (QuoteHealth health, _, QuoteRegistry registry) = Build();
+        registry.SetLastCycleDuration(TimeSpan.FromSeconds(30));
+        registry.SetCycleStarted(Now - TimeSpan.FromSeconds(5));
+
+        QuoteHealthReport report = await health.CheckAsync(Ct);
+
+        Assert.Equal(TimeSpan.FromSeconds(30), report.LastCycleDuration);
+    }
 }
 
 /// <summary>A quote store whose every read fails.</summary>
@@ -247,9 +364,20 @@ public sealed class ThrowingQuoteStore : IQuoteStore
 
     public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken) => throw new IOException("down");
 
-    public Task MarkValuationAttemptedAsync(string transactionHash, DateTimeOffset attemptedAt, CancellationToken cancellationToken) => throw new IOException("down");
-
     public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken) => throw new IOException("down");
+
+    public Task SaveValuationFailureAsync(
+        string transactionHash, string reason, DateTimeOffset failedAt, CancellationToken cancellationToken) =>
+        throw new IOException("down");
+
+    public Task SaveWriteOffAsync(
+        string transactionHash, string reason, DateTimeOffset writtenOffAt, CancellationToken cancellationToken) =>
+        throw new IOException("down");
+
+    public Task<IReadOnlyList<PaymentValuation>> GetFailedValuationsAsync(
+        int limit, int offset, CancellationToken cancellationToken) => throw new IOException("down");
+
+    public Task<int> CountFailedValuationsAsync(CancellationToken cancellationToken) => throw new IOException("down");
 
     public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) => throw new IOException("down");
 

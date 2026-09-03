@@ -5,8 +5,9 @@ namespace Xrpl.PaymentGateway.Tests.Fakes;
 /// <summary>
 /// An <see cref="IQuoteStore"/> whose read, write and enqueue calls never complete on their own, for
 /// proving that every path bounds it with <see cref="QuoteOptions.StoreTimeout"/> rather than blocking
-/// indefinitely — the collector's own <see cref="GetQuoteAsync"/>/<see cref="SaveQuoteAsync"/>, and
-/// <c>ValuationEnqueuer</c>'s <see cref="TryEnqueueValuationAsync"/>.
+/// indefinitely — the collector's own <see cref="GetQuoteAsync"/>/<see cref="SaveQuoteAsync"/>,
+/// <c>ValuationEnqueuer</c>'s <see cref="TryEnqueueValuationAsync"/>, and <c>QuoteHealth.CheckAsync</c>'s
+/// own <see cref="GetQuotesAsync"/> — the first store call it makes.
 /// </summary>
 public sealed class HangingQuoteStore : IQuoteStore
 {
@@ -19,8 +20,11 @@ public sealed class HangingQuoteStore : IQuoteStore
         return null;
     }
 
-    public Task<IReadOnlyList<StoredQuote>> GetQuotesAsync(CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<StoredQuote>>(Array.Empty<StoredQuote>());
+    public async Task<IReadOnlyList<StoredQuote>> GetQuotesAsync(CancellationToken cancellationToken)
+    {
+        await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
+        return Array.Empty<StoredQuote>();
+    }
 
     public async Task<bool> TryEnqueueValuationAsync(PaymentValuation pending, CancellationToken cancellationToken)
     {
@@ -31,10 +35,21 @@ public sealed class HangingQuoteStore : IQuoteStore
     public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<PaymentValuation>>(Array.Empty<PaymentValuation>());
 
-    public Task MarkValuationAttemptedAsync(string transactionHash, DateTimeOffset attemptedAt, CancellationToken cancellationToken) =>
+    public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public Task SaveValuationFailureAsync(
+        string transactionHash, string reason, DateTimeOffset failedAt, CancellationToken cancellationToken) =>
         Task.CompletedTask;
 
-    public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task SaveWriteOffAsync(
+        string transactionHash, string reason, DateTimeOffset writtenOffAt, CancellationToken cancellationToken) =>
+        Task.CompletedTask;
+
+    public Task<IReadOnlyList<PaymentValuation>> GetFailedValuationsAsync(
+        int limit, int offset, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<PaymentValuation>>(Array.Empty<PaymentValuation>());
+
+    public Task<int> CountFailedValuationsAsync(CancellationToken cancellationToken) => Task.FromResult(0);
 
     public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<PaymentValuation>>(Array.Empty<PaymentValuation>());

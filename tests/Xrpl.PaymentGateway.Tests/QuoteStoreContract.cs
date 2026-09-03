@@ -51,6 +51,7 @@ public abstract class QuoteStoreContract
         PaymentLedgerIndex = pending.PaymentLedgerIndex,
         DestinationTag = pending.DestinationTag,
         EnqueuedAt = pending.EnqueuedAt,
+        State = ValuationState.Valued,
         ValuedAt = new DateTimeOffset(2026, 8, 30, 12, 0, 30, TimeSpan.Zero),
         QuoteAmount = quoteAmount,
         EffectivePrice = quoteAmount / pending.Amount,
@@ -60,6 +61,21 @@ public abstract class QuoteStoreContract
         SnapshotLedgerIndex = 900,
         SnapshotCapturedAt = new DateTimeOffset(2026, 8, 30, 12, 0, 0, TimeSpan.Zero),
         Route = "XPM->XRP->USD",
+    };
+
+    private static PaymentValuation ValuedManually(PaymentValuation pending, decimal rate) => new PaymentValuation
+    {
+        TransactionHash = pending.TransactionHash,
+        PairKey = pending.PairKey,
+        Amount = pending.Amount,
+        PaymentLedgerIndex = pending.PaymentLedgerIndex,
+        DestinationTag = pending.DestinationTag,
+        EnqueuedAt = pending.EnqueuedAt,
+        State = ValuationState.ValuedManually,
+        ValuedAt = new DateTimeOffset(2026, 8, 30, 12, 5, 0, TimeSpan.Zero),
+        QuoteAmount = pending.Amount * rate,
+        EffectivePrice = rate,
+        FullyFilled = true,
     };
 
     [Fact]
@@ -141,6 +157,7 @@ public abstract class QuoteStoreContract
 
         IReadOnlyList<PaymentValuation> pending = await store.GetPendingValuationsAsync(10, Ct);
         Assert.Single(pending);
+        Assert.Equal(ValuationState.Pending, pending[0].State);
         Assert.False(pending[0].IsValued);
         Assert.Empty(await store.GetUndeliveredValuationsAsync(10, Ct));
     }
@@ -216,6 +233,7 @@ public abstract class QuoteStoreContract
             PaymentLedgerIndex = pending.PaymentLedgerIndex,
             DestinationTag = pending.DestinationTag,
             EnqueuedAt = pending.EnqueuedAt,
+            State = ValuationState.Valued,
             ValuedAt = new DateTimeOffset(2026, 8, 30, 12, 0, 42, TimeSpan.Zero),
             QuoteAmount = 12.375m,
             EffectivePrice = 0.010025m,
@@ -239,6 +257,7 @@ public abstract class QuoteStoreContract
         Assert.Equal(valued.PaymentLedgerIndex, read.PaymentLedgerIndex);
         Assert.Equal(valued.DestinationTag, read.DestinationTag);
         Assert.Equal(valued.EnqueuedAt, read.EnqueuedAt);
+        Assert.Equal(ValuationState.Valued, read.State);
         Assert.Equal(valued.ValuedAt, read.ValuedAt);
         Assert.Equal(valued.QuoteAmount, read.QuoteAmount);
         Assert.Equal(valued.EffectivePrice, read.EffectivePrice);
@@ -272,61 +291,150 @@ public abstract class QuoteStoreContract
     }
 
     [Fact]
-    public async Task AnAttemptedEntrySortsBehindOneThatHasNot()
+    public async Task AFailedEntryLeavesThePendingQueueAndSurvivesTheRoundTripIntact()
     {
         IQuoteStore store = await CreateAsync();
-        await store.TryEnqueueValuationAsync(Pending("HASH1"), Ct);
-        await store.TryEnqueueValuationAsync(Pending("HASH2"), Ct);
+        PaymentValuation pending = Pending("HASH1");
+        await store.TryEnqueueValuationAsync(pending, Ct);
 
-        // HASH1 was tried and is still unpriced; HASH2 has never been tried. Fairness means HASH2 goes
-        // first even though it was queued second — otherwise HASH1 would keep occupying the head of a
-        // queue it can never clear, starving everything queued behind it.
-        await store.MarkValuationAttemptedAsync(
-            "HASH1", new DateTimeOffset(2026, 8, 30, 12, 0, 10, TimeSpan.Zero), Ct);
+        DateTimeOffset failedAt = new DateTimeOffset(2026, 8, 30, 12, 1, 0, TimeSpan.Zero);
+        await store.SaveValuationFailureAsync("HASH1", "the pair currently has no liquidity", failedAt, Ct);
 
-        IReadOnlyList<PaymentValuation> pending = await store.GetPendingValuationsAsync(10, Ct);
+        Assert.Empty(await store.GetPendingValuationsAsync(10, Ct));
 
-        Assert.Equal(new[] { "HASH2", "HASH1" }, pending.Select(v => v.TransactionHash));
+        PaymentValuation? read = await store.GetValuationAsync("HASH1", Ct);
+        Assert.NotNull(read);
+        Assert.Equal(ValuationState.Failed, read.State);
+        Assert.True(read.IsFailed);
+        Assert.False(read.IsValued);
+        Assert.Equal(failedAt, read.FailedAt);
+        Assert.Equal("the pair currently has no liquidity", read.FailureReason);
+        Assert.Null(read.QuoteAmount);
     }
 
     [Fact]
-    public async Task AmongAttemptedEntriesTheLeastRecentlyAttemptedGoesFirst()
+    public async Task FailingSomethingThatIsNotPendingDoesNothing()
     {
+        // Only a Pending entry can fail — an entry the automatic pipeline already priced, or already
+        // failed, must not be knocked out of its state by a stray failure write racing behind it.
         IQuoteStore store = await CreateAsync();
-        await store.TryEnqueueValuationAsync(Pending("HASH1"), Ct);
-        await store.TryEnqueueValuationAsync(Pending("HASH2"), Ct);
-        await store.MarkValuationAttemptedAsync(
-            "HASH1", new DateTimeOffset(2026, 8, 30, 12, 0, 20, TimeSpan.Zero), Ct);
-        await store.MarkValuationAttemptedAsync(
-            "HASH2", new DateTimeOffset(2026, 8, 30, 12, 0, 10, TimeSpan.Zero), Ct);
+        PaymentValuation pending = Pending("HASH1");
+        await store.TryEnqueueValuationAsync(pending, Ct);
+        await store.SaveValuationAsync(Valued(pending, 9.9m), Ct);
 
-        IReadOnlyList<PaymentValuation> pending = await store.GetPendingValuationsAsync(10, Ct);
+        await store.SaveValuationFailureAsync("HASH1", "should not apply", DateTimeOffset.UtcNow, Ct);
 
-        Assert.Equal(new[] { "HASH2", "HASH1" }, pending.Select(v => v.TransactionHash));
+        PaymentValuation? read = await store.GetValuationAsync("HASH1", Ct);
+        Assert.NotNull(read);
+        Assert.Equal(ValuationState.Valued, read.State);
+        Assert.Equal(9.9m, read.QuoteAmount);
     }
 
     [Fact]
-    public async Task AnOldEntryAttemptedOnceStillOutranksAPaymentEnqueuedAfterThatAttempt()
+    public async Task AWrittenOffEntrySurvivesTheRoundTripIntactAndKeepsWhyItOriginallyFailed()
     {
-        // "Never-attempted first, then by attempt time" looks like the same fairness rule as ordering by
-        // COALESCE(last_attempt_at, enqueued_at), but it is not: it drops an entry that has been tried
-        // even once behind every payment queued afterwards, however much older it is. If arrivals keep
-        // the never-attempted group at or above the batch size, the stamped backlog is never fetched
-        // again — starvation, just moved to the whole attempted set instead of cured. This pins the
-        // correct rule: HASH1 is older, was tried once before HASH2 even existed, and must still be
-        // fetched ahead of it.
         IQuoteStore store = await CreateAsync();
-        await store.TryEnqueueValuationAsync(
-            Pending("HASH1", enqueuedAt: new DateTimeOffset(2026, 8, 30, 12, 0, 0, TimeSpan.Zero)), Ct);
-        await store.MarkValuationAttemptedAsync(
-            "HASH1", new DateTimeOffset(2026, 8, 30, 12, 0, 10, TimeSpan.Zero), Ct);
+        PaymentValuation pending = Pending("HASH1");
+        await store.TryEnqueueValuationAsync(pending, Ct);
+        DateTimeOffset failedAt = new DateTimeOffset(2026, 8, 30, 12, 1, 0, TimeSpan.Zero);
+        await store.SaveValuationFailureAsync("HASH1", "the pair currently has no liquidity", failedAt, Ct);
 
-        await store.TryEnqueueValuationAsync(
-            Pending("HASH2", enqueuedAt: new DateTimeOffset(2026, 8, 30, 12, 0, 20, TimeSpan.Zero)), Ct);
+        DateTimeOffset writtenOffAt = new DateTimeOffset(2026, 8, 30, 12, 10, 0, TimeSpan.Zero);
+        await store.SaveWriteOffAsync("HASH1", "dust", writtenOffAt, Ct);
 
-        IReadOnlyList<PaymentValuation> pending = await store.GetPendingValuationsAsync(10, Ct);
+        PaymentValuation? read = await store.GetValuationAsync("HASH1", Ct);
+        Assert.NotNull(read);
+        Assert.Equal(ValuationState.WrittenOff, read.State);
+        Assert.True(read.IsWrittenOff);
+        Assert.False(read.IsFailed);
+        Assert.Equal(writtenOffAt, read.WrittenOffAt);
+        Assert.Equal("dust", read.WriteOffReason);
+        // The original failure is kept for the record, alongside the operator's own reason.
+        Assert.Equal(failedAt, read.FailedAt);
+        Assert.Equal("the pair currently has no liquidity", read.FailureReason);
+    }
 
-        Assert.Equal(new[] { "HASH1", "HASH2" }, pending.Select(v => v.TransactionHash));
+    [Fact]
+    public async Task WritingOffSomethingThatIsNotFailedDoesNothing()
+    {
+        // Writing off something that priced normally is a mistake, not a workflow — only a Failed entry
+        // can be written off.
+        IQuoteStore store = await CreateAsync();
+        PaymentValuation pending = Pending("HASH1");
+        await store.TryEnqueueValuationAsync(pending, Ct);
+        await store.SaveValuationAsync(Valued(pending, 9.9m), Ct);
+
+        await store.SaveWriteOffAsync("HASH1", "should not apply", DateTimeOffset.UtcNow, Ct);
+
+        PaymentValuation? read = await store.GetValuationAsync("HASH1", Ct);
+        Assert.NotNull(read);
+        Assert.Equal(ValuationState.Valued, read.State);
+    }
+
+    [Fact]
+    public async Task AManuallyPricedEntrySurvivesTheRoundTripAndClearsTheFailureItReplaced()
+    {
+        IQuoteStore store = await CreateAsync();
+        PaymentValuation pending = Pending("HASH1", amount: 1000m);
+        await store.TryEnqueueValuationAsync(pending, Ct);
+        await store.SaveValuationFailureAsync("HASH1", "the pair currently has no liquidity", DateTimeOffset.UtcNow, Ct);
+
+        await store.SaveValuationAsync(ValuedManually(pending, rate: 0.02m), Ct);
+
+        PaymentValuation? read = await store.GetValuationAsync("HASH1", Ct);
+        Assert.NotNull(read);
+        Assert.Equal(ValuationState.ValuedManually, read.State);
+        Assert.True(read.IsValued);
+        Assert.Equal(20m, read.QuoteAmount);
+        Assert.Equal(0.02m, read.EffectivePrice);
+        // Resolved now, not failed and valued at once.
+        Assert.Null(read.FailedAt);
+        Assert.Null(read.FailureReason);
+    }
+
+    [Fact]
+    public async Task FailedAndWrittenOffEntriesAreDeliveredLikeValuedOnes()
+    {
+        // A host learns about all four non-pending outcomes, not only a successful price — see
+        // IPaymentValuedHandler. GetUndeliveredValuationsAsync is what ValuationWorker's delivery pass
+        // polls, so it must not filter Failed and WrittenOff out.
+        IQuoteStore store = await CreateAsync();
+
+        PaymentValuation failedPending = Pending("FAILED");
+        await store.TryEnqueueValuationAsync(failedPending, Ct);
+        await store.SaveValuationFailureAsync("FAILED", "no liquidity", DateTimeOffset.UtcNow, Ct);
+
+        PaymentValuation writtenOffPending = Pending("WRITTENOFF");
+        await store.TryEnqueueValuationAsync(writtenOffPending, Ct);
+        await store.SaveValuationFailureAsync("WRITTENOFF", "no liquidity", DateTimeOffset.UtcNow, Ct);
+        await store.SaveWriteOffAsync("WRITTENOFF", "dust", DateTimeOffset.UtcNow, Ct);
+
+        IReadOnlyList<PaymentValuation> undelivered = await store.GetUndeliveredValuationsAsync(10, Ct);
+
+        Assert.Equal(2, undelivered.Count);
+        Assert.Contains(undelivered, v => v.TransactionHash == "FAILED" && v.State == ValuationState.Failed);
+        Assert.Contains(undelivered, v => v.TransactionHash == "WRITTENOFF" && v.State == ValuationState.WrittenOff);
+    }
+
+    [Fact]
+    public async Task FailedValuationsArePagedOldestFailedFirstAndCounted()
+    {
+        IQuoteStore store = await CreateAsync();
+        for (int i = 1; i <= 5; i++)
+        {
+            await store.TryEnqueueValuationAsync(
+                Pending($"HASH{i}", enqueuedAt: new DateTimeOffset(2026, 8, 30, 12, 0, i, TimeSpan.Zero)), Ct);
+            await store.SaveValuationFailureAsync(
+                $"HASH{i}", "no liquidity", new DateTimeOffset(2026, 8, 30, 12, 1, i, TimeSpan.Zero), Ct);
+        }
+
+        Assert.Equal(5, await store.CountFailedValuationsAsync(Ct));
+
+        IReadOnlyList<PaymentValuation> firstPage = await store.GetFailedValuationsAsync(2, 0, Ct);
+        Assert.Equal(new[] { "HASH1", "HASH2" }, firstPage.Select(v => v.TransactionHash));
+
+        IReadOnlyList<PaymentValuation> secondPage = await store.GetFailedValuationsAsync(2, 2, Ct);
+        Assert.Equal(new[] { "HASH3", "HASH4" }, secondPage.Select(v => v.TransactionHash));
     }
 
     [Fact]
