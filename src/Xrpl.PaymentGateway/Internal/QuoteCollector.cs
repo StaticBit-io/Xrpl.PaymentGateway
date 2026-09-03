@@ -21,6 +21,13 @@ internal sealed class QuoteCollector : BackgroundService
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<QuoteCollector> _logger;
 
+    /// <summary>
+    /// The last <see cref="StoredQuote"/> this collector itself wrote for a pair, kept so a store read
+    /// failure has a fallback to build an honest failure row from instead of losing the previous row's
+    /// price and failure count entirely. See <see cref="RefreshAsync"/>.
+    /// </summary>
+    private readonly Dictionary<string, StoredQuote> _lastWritten = new Dictionary<string, StoredQuote>(StringComparer.Ordinal);
+
     public QuoteCollector(
         IOptions<QuoteOptions> options,
         IQuoteSource source,
@@ -58,6 +65,8 @@ internal sealed class QuoteCollector : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            DateTimeOffset cycleStarted = _timeProvider.GetUtcNow();
+
             foreach (QuotePair pair in _registry.Pairs)
             {
                 if (stoppingToken.IsCancellationRequested)
@@ -87,18 +96,28 @@ internal sealed class QuoteCollector : BackgroundService
                     return;
                 }
             }
+
+            // Measured, not predicted: QuoteSchedule.CycleFitsInInterval only checks the spacing between
+            // pairs and knows nothing about how long a capture itself takes, so this is what tells an
+            // operator the real refresh period rather than the one the schedule merely aimed for.
+            _registry.SetLastCycleDuration(_timeProvider.GetUtcNow() - cycleStarted);
         }
     }
 
     private async Task RefreshAsync(QuotePair pair, CancellationToken stoppingToken)
     {
         DateTimeOffset attemptedAt = _timeProvider.GetUtcNow();
-        StoredQuote? previous = null;
-        bool previousReadFailed = false;
+        StoredQuote? previous;
+        bool previousKnown;
 
         try
         {
-            previous = await _store.GetQuoteAsync(pair.Key, stoppingToken).ConfigureAwait(false);
+            using CancellationTokenSource timeoutCts = new CancellationTokenSource(_options.StoreTimeout, _timeProvider);
+            using CancellationTokenSource readTimeout =
+                CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, timeoutCts.Token);
+
+            previous = await _store.GetQuoteAsync(pair.Key, readTimeout.Token).ConfigureAwait(false);
+            previousKnown = true;
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
@@ -106,11 +125,25 @@ internal sealed class QuoteCollector : BackgroundService
         }
         catch (Exception ex)
         {
-            // Reading the previous row is a nicety; failing to read it must not skip the refresh. But
-            // "could not read it" is not the same fact as "there is no previous row" — see the failure
-            // branch below, which must not conflate the two.
-            previousReadFailed = true;
-            _logger.LogWarning(ex, "reading the stored quote for {Pair} failed", pair.Key);
+            // Reading the previous row is a nicety; failing to read it must not skip the refresh. The
+            // collector's own last write — see _lastWritten — stands in for it: a correct failure row,
+            // carrying the right price and failure count, can be produced either way. On a cold start,
+            // before this collector has ever written the pair, the cache has nothing either, and previous
+            // state is genuinely unknown — not "empty", just unseen. Writing a null-filled failure row in
+            // that case would overwrite a row that may still be sitting in the store, simply unread this
+            // cycle, so RefreshAsync below skips the write entirely rather than guessing.
+            if (_lastWritten.TryGetValue(pair.Key, out StoredQuote? cached))
+            {
+                previous = cached;
+                previousKnown = true;
+            }
+            else
+            {
+                previous = null;
+                previousKnown = false;
+            }
+
+            _logger.LogWarning(ex, "reading the stored quote for {Pair} failed; using the last written value", pair.Key);
         }
 
         try
@@ -137,12 +170,14 @@ internal sealed class QuoteCollector : BackgroundService
             // would turn a network blip into a checkout outage.
             _logger.LogError(ex, "refreshing the quote for {Pair} failed; the last good reading is kept", pair.Key);
 
-            if (previousReadFailed)
+            if (!previousKnown)
             {
-                // We do not know what the previous row held, so a failure record built from "no
-                // previous row" would overwrite a possibly-good reading with a hollow one. Skip the
-                // write: the next cycle either reads the row successfully or fails the same way and
-                // gets another chance, but it never persists a worse row than the one already stored.
+                // The store read failed and this collector has never written the pair itself: we have no
+                // way to know whether the store currently holds a good row or nothing at all. Writing a
+                // null-filled failure row here would blindly overwrite it if it does. Leave the store
+                // alone; the next successful read or write will put us back on solid ground.
+                _logger.LogWarning(
+                    "skipping the failure write for {Pair}; the previously stored value is unknown", pair.Key);
                 return;
             }
 
@@ -154,7 +189,16 @@ internal sealed class QuoteCollector : BackgroundService
     {
         try
         {
-            await _store.SaveQuoteAsync(quote, stoppingToken).ConfigureAwait(false);
+            using CancellationTokenSource timeoutCts = new CancellationTokenSource(_options.StoreTimeout, _timeProvider);
+            using CancellationTokenSource writeTimeout =
+                CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, timeoutCts.Token);
+
+            await _store.SaveQuoteAsync(quote, writeTimeout.Token).ConfigureAwait(false);
+
+            // Recorded only once the write actually succeeded: a failure row that never reached the store
+            // must not become the fallback the next read failure builds on top of.
+            _lastWritten[quote.PairKey] = quote;
+            _registry.SetLastWriteSucceeded(true);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
@@ -163,7 +207,13 @@ internal sealed class QuoteCollector : BackgroundService
         catch (Exception ex)
         {
             // The in-memory registry is already updated, so quoting keeps working; only the operator's
-            // view of it is behind. Retrying here would stall the cycle for every other pair.
+            // view of it is behind. Retrying here would stall the cycle for every other pair. Covers both
+            // an outright store failure and the StoreTimeout above — a store that merely hangs must not
+            // stall the pairs behind it either. Recorded on the registry too: otherwise a store whose
+            // writes hang while its reads still answer would read as healthy forever, since the freshness
+            // fields come from the in-memory snapshot and update every cycle regardless of whether the
+            // write beneath them ever lands.
+            _registry.SetLastWriteSucceeded(false);
             _logger.LogError(ex, "persisting the quote for {Pair} failed", quote.PairKey);
         }
     }

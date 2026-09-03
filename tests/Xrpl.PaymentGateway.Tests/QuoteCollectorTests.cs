@@ -105,6 +105,51 @@ public class QuoteCollectorTests
             int limit, CancellationToken cancellationToken) =>
             _inner.GetPendingValuationsAsync(limit, cancellationToken);
 
+        public Task MarkValuationAttemptedAsync(string transactionHash, DateTimeOffset attemptedAt, CancellationToken cancellationToken) =>
+            _inner.MarkValuationAttemptedAsync(transactionHash, attemptedAt, cancellationToken);
+
+        public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken) =>
+            _inner.SaveValuationAsync(valuation, cancellationToken);
+
+        public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(
+            int limit, CancellationToken cancellationToken) =>
+            _inner.GetUndeliveredValuationsAsync(limit, cancellationToken);
+
+        public Task MarkValuationDeliveredAsync(string transactionHash, CancellationToken cancellationToken) =>
+            _inner.MarkValuationDeliveredAsync(transactionHash, cancellationToken);
+
+        public Task<PaymentValuation?> GetValuationAsync(string transactionHash, CancellationToken cancellationToken) =>
+            _inner.GetValuationAsync(transactionHash, cancellationToken);
+    }
+
+    /// <summary>An <see cref="IQuoteStore"/> whose quote writes always fail while reads and everything
+    /// else delegate to a real <see cref="InMemoryQuoteStore"/> — the "reads work, writes hang or throw"
+    /// shape that must not read as healthy.</summary>
+    private sealed class WriteThrowsQuoteStore : IQuoteStore
+    {
+        private readonly InMemoryQuoteStore _inner;
+
+        public WriteThrowsQuoteStore(InMemoryQuoteStore inner) => _inner = inner;
+
+        public Task SaveQuoteAsync(StoredQuote quote, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("store write unavailable");
+
+        public Task<StoredQuote?> GetQuoteAsync(string pairKey, CancellationToken cancellationToken) =>
+            _inner.GetQuoteAsync(pairKey, cancellationToken);
+
+        public Task<IReadOnlyList<StoredQuote>> GetQuotesAsync(CancellationToken cancellationToken) =>
+            _inner.GetQuotesAsync(cancellationToken);
+
+        public Task<bool> TryEnqueueValuationAsync(PaymentValuation pending, CancellationToken cancellationToken) =>
+            _inner.TryEnqueueValuationAsync(pending, cancellationToken);
+
+        public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(
+            int limit, CancellationToken cancellationToken) =>
+            _inner.GetPendingValuationsAsync(limit, cancellationToken);
+
+        public Task MarkValuationAttemptedAsync(string transactionHash, DateTimeOffset attemptedAt, CancellationToken cancellationToken) =>
+            _inner.MarkValuationAttemptedAsync(transactionHash, attemptedAt, cancellationToken);
+
         public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken) =>
             _inner.SaveValuationAsync(valuation, cancellationToken);
 
@@ -216,6 +261,26 @@ public class QuoteCollectorTests
     }
 
     [Fact]
+    public async Task AHangingStoreReadOrWriteIsAbandonedAndDoesNotStallLaterCycles()
+    {
+        // Before StoreTimeout applied to the collector's own calls, GetQuoteAsync/SaveQuoteAsync carried
+        // only the stopping token: a store that merely hangs — never throwing, never completing — would
+        // wedge RefreshAsync forever on the very first pair, with no log line and nothing to show for it
+        // beyond every pair's freshness silently decaying. A second capture, on a later cycle, is proof
+        // the loop kept moving instead of hanging there.
+        ScriptedQuoteSource source = new ScriptedQuoteSource();
+        await using Harness harness = new Harness(
+            source,
+            new HangingQuoteStore(),
+            options => options.StoreTimeout = TimeSpan.FromMilliseconds(100));
+
+        await harness.StartAsync();
+
+        await TestWait.UntilAsync(
+            () => source.CountFor(Xpm.Key) >= 2, "a second cycle despite the hanging store");
+    }
+
+    [Fact]
     public async Task PairsAreRefreshedOneAfterAnotherRatherThanAllAtOnce()
     {
         ScriptedQuoteSource source = new ScriptedQuoteSource();
@@ -236,6 +301,34 @@ public class QuoteCollectorTests
         await Task.Delay(200, Ct);
         Assert.Single(source.Captured);
         Assert.Equal(Xpm.Key, source.Captured[0]);
+    }
+
+    [Fact]
+    public async Task ALastCycleDurationIsRecordedAfterTheFirstFullCycle()
+    {
+        ScriptedQuoteSource source = new ScriptedQuoteSource();
+        await using Harness harness = new Harness(
+            source,
+            options =>
+            {
+                // A tiny interval makes MinimumPairStagger, not interval/pairCount, the binding delay —
+                // otherwise PairDelay would compute a much larger gap and the cycle would take far longer
+                // than this test should wait.
+                options.RefreshInterval = TimeSpan.FromMilliseconds(1);
+                options.MinimumPairStagger = TimeSpan.FromMilliseconds(50);
+            },
+            Xpm,
+            Solo);
+
+        Assert.Null(harness.Registry.LastCycleDuration);
+
+        await harness.StartAsync();
+        await TestWait.UntilAsync(() => harness.Registry.LastCycleDuration is not null, "the first cycle to complete");
+
+        // Measured, not the schedule's own guess: with two pairs at 50ms apart the observed duration must
+        // be at least that long, which QuoteSchedule.CycleFitsInInterval alone could never tell us.
+        TimeSpan duration = harness.Registry.LastCycleDuration!.Value;
+        Assert.True(duration >= TimeSpan.FromMilliseconds(40), $"expected at least ~50ms, got {duration}");
     }
 
     [Fact]
@@ -277,45 +370,158 @@ public class QuoteCollectorTests
     }
 
     [Fact]
-    public async Task AFailedReadOfThePreviousRowDoesNotBlankAGoodStoredQuote()
+    public async Task AFailedReadFallsBackToTheCollectorsOwnLastWrittenQuoteRatherThanBlankingIt()
     {
         // A read failure is not proof the pair has no history — it is proof we could not see it this
-        // time. Building a failure record on top of "no previous row" would silently erase a perfectly
-        // good reading purely because the store hiccupped on the read.
-        InMemoryQuoteStore inner = new InMemoryQuoteStore();
-        await inner.SaveQuoteAsync(
-            new StoredQuote
-            {
-                PairKey = Xpm.Key,
-                Currency = Xpm.Currency,
-                Issuer = Xpm.Issuer,
-                QuoteCurrency = Xpm.QuoteCurrency,
-                QuoteIssuer = Xpm.QuoteIssuer,
-                MarginalPrice = 0.09m,
-                LedgerIndex = 777,
-                CapturedAt = DateTimeOffset.UtcNow,
-                LastAttemptAt = DateTimeOffset.UtcNow,
-                ConsecutiveFailures = 0,
-                LastError = null,
-            },
-            Ct);
+        // time. The collector remembers what it itself last wrote and falls back to that, so the failure
+        // row it builds keeps the good price and chains the failure count correctly, rather than either
+        // erasing a good reading or freezing the failure counters (the two ways this used to go wrong).
+        ScriptedQuoteSource source = new ScriptedQuoteSource();
+        int calls = 0;
+        source.Behaviour[Xpm.Key] = () =>
+        {
+            calls++;
+            return calls == 1
+                ? new StubQuoteSnapshot(price: 0.09m, ledgerIndex: 777)
+                : throw new InvalidOperationException("node unreachable");
+        };
 
+        InMemoryQuoteStore inner = new InMemoryQuoteStore();
+        ReadFailsAfterFirstWriteQuoteStore store = new ReadFailsAfterFirstWriteQuoteStore(inner);
+        await using Harness harness = new Harness(source, store, configure: null);
+
+        await harness.StartAsync();
+
+        // The first cycle writes the good quote; every read after that fails, same as every capture.
+        // Several cycles, not just one, so failure counts that reset instead of chaining are caught too.
+        await TestWait.UntilAsync(
+            () => inner.GetQuoteAsync(Xpm.Key, Ct).GetAwaiter().GetResult()?.ConsecutiveFailures >= 3,
+            "several failures chained on top of the collector's own last write");
+
+        StoredQuote? quote = await inner.GetQuoteAsync(Xpm.Key, Ct);
+        Assert.NotNull(quote);
+        Assert.Equal(0.09m, quote!.MarginalPrice);
+        Assert.Equal(777u, quote.LedgerIndex);
+        Assert.Contains("node unreachable", quote.LastError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AFailedReadOnAColdStartLeavesAGenuinelyGoodStoredRowUntouched()
+    {
+        // Nothing has ever been written by this collector — a cold start, so _lastWritten has nothing for
+        // the pair either — and both the read and the capture fail in the same cycle. The store may still
+        // hold a genuinely good row underneath the failed read (a restart racing a brief database hiccup
+        // is exactly this shape). Writing a failure row with null price fields here would destroy that row
+        // over a read that simply did not succeed this cycle, not over evidence the row is actually bad.
+        // The previous state is genuinely unknown, so the fix skips the write and leaves the store alone.
         ScriptedQuoteSource source = new ScriptedQuoteSource();
         source.Behaviour[Xpm.Key] = () => throw new InvalidOperationException("node unreachable");
+
+        InMemoryQuoteStore inner = new InMemoryQuoteStore();
+        StoredQuote goodRow = new StoredQuote
+        {
+            PairKey = Xpm.Key,
+            Currency = Xpm.Currency,
+            Issuer = Xpm.Issuer,
+            QuoteCurrency = Xpm.QuoteCurrency,
+            QuoteIssuer = Xpm.QuoteIssuer,
+            MarginalPrice = 0.42m,
+            LedgerIndex = 12345,
+            CapturedAt = new DateTimeOffset(2026, 8, 30, 12, 0, 0, TimeSpan.Zero),
+            LastAttemptAt = new DateTimeOffset(2026, 8, 30, 12, 0, 0, TimeSpan.Zero),
+            ConsecutiveFailures = 0,
+        };
+        // Written directly against the underlying store, bypassing the collector entirely, so the
+        // collector's own _lastWritten cache never learns of it — the essence of "cold start" here.
+        await inner.SaveQuoteAsync(goodRow, Ct);
 
         ReadThrowsQuoteStore store = new ReadThrowsQuoteStore(inner);
         await using Harness harness = new Harness(source, store, configure: null);
 
         await harness.StartAsync();
 
-        // Several cycles, not just one, so a hollow write happening on a later attempt is caught too.
-        await TestWait.UntilAsync(() => source.CountFor(Xpm.Key) >= 3, "several failed captures");
+        // Several cycles, not just one, so a write that only happens to be skipped once is not mistaken
+        // for the guard actually holding.
+        await TestWait.UntilAsync(() => source.CountFor(Xpm.Key) >= 3, "several failed cycles");
 
         StoredQuote? quote = await inner.GetQuoteAsync(Xpm.Key, Ct);
         Assert.NotNull(quote);
-        Assert.Equal(0.09m, quote!.MarginalPrice);
-        Assert.Equal(777u, quote.LedgerIndex);
+        Assert.Equal(0.42m, quote!.MarginalPrice);
+        Assert.Equal(12345u, quote.LedgerIndex);
         Assert.Equal(0, quote.ConsecutiveFailures);
         Assert.Null(quote.LastError);
+    }
+
+    [Fact]
+    public async Task AWriteThatKeepsFailingIsReflectedOnTheRegistryEvenThoughReadsStillWork()
+    {
+        // A store whose writes hang or throw while its reads keep answering must not look healthy: the
+        // registry is the one place QuoteHealth can learn a persist attempt actually failed, since the
+        // in-memory snapshot and PairsFailing/PairsWithFreshQuote all come from state this collector
+        // updates regardless of whether the write beneath them ever lands.
+        ScriptedQuoteSource source = new ScriptedQuoteSource();
+        source.Behaviour[Xpm.Key] = () => new StubQuoteSnapshot(price: 0.05m);
+
+        InMemoryQuoteStore inner = new InMemoryQuoteStore();
+        WriteThrowsQuoteStore store = new WriteThrowsQuoteStore(inner);
+        await using Harness harness = new Harness(source, store, configure: null);
+
+        Assert.True(harness.Registry.LastWriteSucceeded);
+
+        await harness.StartAsync();
+
+        await TestWait.UntilAsync(() => !harness.Registry.LastWriteSucceeded, "the failed write to register");
+
+        // The capture itself succeeded, so the in-memory snapshot is current — proving the registry flag,
+        // not the freshness fields, is what would catch this.
+        Assert.NotNull(harness.Registry.GetSnapshot(Xpm.Key));
+    }
+
+    /// <summary>An <see cref="IQuoteStore"/> whose reads fail once at least one write has gone through,
+    /// so a test can put the collector into "it wrote something good, then the store went read-only"
+    /// without pre-seeding the row by any means other than the collector's own write.</summary>
+    private sealed class ReadFailsAfterFirstWriteQuoteStore : IQuoteStore
+    {
+        private readonly InMemoryQuoteStore _inner;
+        private bool _hasWritten;
+
+        public ReadFailsAfterFirstWriteQuoteStore(InMemoryQuoteStore inner) => _inner = inner;
+
+        public Task<StoredQuote?> GetQuoteAsync(string pairKey, CancellationToken cancellationToken) =>
+            _hasWritten
+                ? throw new InvalidOperationException("store read unavailable")
+                : _inner.GetQuoteAsync(pairKey, cancellationToken);
+
+        public Task SaveQuoteAsync(StoredQuote quote, CancellationToken cancellationToken)
+        {
+            _hasWritten = true;
+            return _inner.SaveQuoteAsync(quote, cancellationToken);
+        }
+
+        public Task<IReadOnlyList<StoredQuote>> GetQuotesAsync(CancellationToken cancellationToken) =>
+            _inner.GetQuotesAsync(cancellationToken);
+
+        public Task<bool> TryEnqueueValuationAsync(PaymentValuation pending, CancellationToken cancellationToken) =>
+            _inner.TryEnqueueValuationAsync(pending, cancellationToken);
+
+        public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(
+            int limit, CancellationToken cancellationToken) =>
+            _inner.GetPendingValuationsAsync(limit, cancellationToken);
+
+        public Task MarkValuationAttemptedAsync(string transactionHash, DateTimeOffset attemptedAt, CancellationToken cancellationToken) =>
+            _inner.MarkValuationAttemptedAsync(transactionHash, attemptedAt, cancellationToken);
+
+        public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken) =>
+            _inner.SaveValuationAsync(valuation, cancellationToken);
+
+        public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(
+            int limit, CancellationToken cancellationToken) =>
+            _inner.GetUndeliveredValuationsAsync(limit, cancellationToken);
+
+        public Task MarkValuationDeliveredAsync(string transactionHash, CancellationToken cancellationToken) =>
+            _inner.MarkValuationDeliveredAsync(transactionHash, cancellationToken);
+
+        public Task<PaymentValuation?> GetValuationAsync(string transactionHash, CancellationToken cancellationToken) =>
+            _inner.GetValuationAsync(transactionHash, cancellationToken);
     }
 }

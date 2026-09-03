@@ -22,7 +22,16 @@ internal static class QuoteSchedule
         return even > minimumStagger ? even : minimumStagger;
     }
 
-    /// <summary>Whether a full cycle at that spacing finishes within the interval.</summary>
+    /// <summary>
+    /// Whether the pauses between pairs at that spacing add up to less than the interval.
+    /// </summary>
+    /// <remarks>
+    /// This measures spacing only — the sum of the delays this class hands out between pairs. It knows
+    /// nothing about how long a capture itself takes, so it can answer true while the real refresh period
+    /// runs several times longer than <paramref name="interval"/>. For the actual number, see the
+    /// collector's own <c>QuoteRegistry.LastCycleDuration</c>, which times a whole cycle rather than
+    /// predicting one from its schedule.
+    /// </remarks>
     public static bool CycleFitsInInterval(int pairCount, TimeSpan interval, TimeSpan minimumStagger) =>
         pairCount <= 0 || PairDelay(pairCount, interval, minimumStagger) * pairCount <= interval;
 }

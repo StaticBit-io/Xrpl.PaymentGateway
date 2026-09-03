@@ -71,9 +71,15 @@ internal sealed class QuoteHealth : IQuoteHealth
 
         try
         {
-            foreach (StoredQuote quote in await _store.GetQuotesAsync(cancellationToken).ConfigureAwait(false))
+            // Filtered to what is configured now, exactly as the freshness loop above already is: nothing
+            // ever deletes a row, so a pair removed from configuration would otherwise pin IsHealthy false
+            // forever over a failure that belongs to an asset the gateway no longer prices.
+            Dictionary<string, StoredQuote> quotesByPair = (await _store.GetQuotesAsync(cancellationToken).ConfigureAwait(false))
+                .ToDictionary(q => q.PairKey, StringComparer.Ordinal);
+
+            foreach (QuotePair pair in _registry.Pairs)
             {
-                if (quote.ConsecutiveFailures <= 0)
+                if (!quotesByPair.TryGetValue(pair.Key, out StoredQuote? quote) || quote.ConsecutiveFailures <= 0)
                 {
                     continue;
                 }
@@ -131,7 +137,9 @@ internal sealed class QuoteHealth : IQuoteHealth
             OldestUndeliveredAge = oldestUndeliveredAge,
             CycleFitsInInterval = QuoteSchedule.CycleFitsInInterval(
                 _registry.Pairs.Count, _options.RefreshInterval, _options.MinimumPairStagger),
+            LastCycleDuration = _registry.LastCycleDuration,
             StoreReadable = storeReadable,
+            StoreWritable = _registry.LastWriteSucceeded,
         };
     }
 }

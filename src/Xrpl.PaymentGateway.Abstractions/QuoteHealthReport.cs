@@ -47,11 +47,36 @@ public sealed class QuoteHealthReport
     /// <remarks>False means pairs refresh slower than configured; add fewer pairs or a longer interval.</remarks>
     public required bool CycleFitsInInterval { get; init; }
 
+    /// <summary>
+    /// How long the collector's last full refresh cycle actually took, or null before the first one
+    /// completes.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="CycleFitsInInterval"/> only checks the spacing between pairs; it says nothing about how
+    /// long a capture itself runs, so it can read true while the real refresh period is several times
+    /// <c>RefreshInterval</c>. This is the measured number to compare against that setting instead.
+    /// </remarks>
+    public TimeSpan? LastCycleDuration { get; init; }
+
     /// <summary>Whether the store could be read at all.</summary>
     public required bool StoreReadable { get; init; }
 
     /// <summary>
-    /// True only when every pair holds a fresh reading, nothing is failing, and the store answered.
+    /// Whether the collector's most recent attempt to persist a quote actually reached the store.
+    /// </summary>
+    /// <remarks>
+    /// Reads and writes can fail independently: a store whose writes hang or throw while its reads keep
+    /// answering would otherwise be invisible here, because <see cref="PairsWithFreshQuote"/> and
+    /// <see cref="PairsFailing"/> come from the collector's in-memory snapshot and its own cached last
+    /// write, both of which keep looking current every cycle regardless of whether the write beneath them
+    /// ever lands. This flag is the one thing in the report that is actually derived from a write
+    /// succeeding.
+    /// </remarks>
+    public required bool StoreWritable { get; init; }
+
+    /// <summary>
+    /// True only when every pair holds a fresh reading, nothing is failing, and the store both answered
+    /// and accepted the collector's last write.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -67,5 +92,6 @@ public sealed class QuoteHealthReport
     /// </para>
     /// </remarks>
     public bool IsHealthy =>
-        StoreReadable && PairsFailing == 0 && ConfiguredPairs > 0 && PairsWithFreshQuote == ConfiguredPairs;
+        StoreReadable && StoreWritable && PairsFailing == 0 && ConfiguredPairs > 0
+        && PairsWithFreshQuote == ConfiguredPairs;
 }
