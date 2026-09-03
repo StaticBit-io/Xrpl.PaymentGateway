@@ -9,9 +9,13 @@ namespace Xrpl.PaymentGateway.Internal;
 /// Prices queued payments and delivers the results.
 /// </summary>
 /// <remarks>
-/// Runs behind the payment path, never on it. A payment that cannot be priced — no snapshot yet, a stale
-/// one, an evaluation that threw — simply stays queued: the money is already recorded and its receipt
-/// already announced, so waiting costs nothing but a later number.
+/// Runs behind the payment path, never on it. A payment that cannot be priced for a transient, pair-wide
+/// reason — no snapshot yet, or a stale one — simply stays queued: the money is already recorded and its
+/// receipt already announced, so waiting costs nothing but a later number. A payment that cannot be priced
+/// for a per-entry, non-transient reason — its pair is gone, pricing it threw, the pair has no liquidity,
+/// or the store rejected the row — is moved to <see cref="ValuationState.Failed"/> instead of retried
+/// forever: see <see cref="ValuePendingAsync"/> and <see cref="IFailedValuationAdmin"/>, the operator path
+/// a failed entry then waits on.
 /// </remarks>
 internal sealed class ValuationWorker : BackgroundService
 {
@@ -88,25 +92,29 @@ internal sealed class ValuationWorker : BackgroundService
                 .FirstOrDefault(p => string.Equals(p.Key, entry.PairKey, StringComparison.Ordinal));
             if (pair is null)
             {
-                // The pair was removed from configuration after the payment was queued. Leaving it queued
-                // keeps the record: put the pair back and it prices, drop the row and it is gone for good.
-                // Stamping the attempt is what keeps this entry from pinning the head of the queue forever
-                // and starving every payment behind it — see GetPendingValuationsAsync's ordering contract.
-                await MarkAttemptedAsync(entry.TransactionHash, stoppingToken).ConfigureAwait(false);
+                // Per-entry, and nothing will re-add a removed pair behind this worker's back — terminal,
+                // not transient.
+                await FailAsync(
+                        entry.TransactionHash,
+                        $"pair \"{entry.PairKey}\" is no longer configured",
+                        stoppingToken)
+                    .ConfigureAwait(false);
                 continue;
             }
 
             IQuoteSnapshot? snapshot = await SnapshotForAsync(pair, stoppingToken).ConfigureAwait(false);
             if (snapshot is null)
             {
-                await MarkAttemptedAsync(entry.TransactionHash, stoppingToken).ConfigureAwait(false);
+                // Transient and shared by every entry against this pair: nothing has been captured for it
+                // yet, or the last capture failed. The entry simply stays queued and prices itself once a
+                // snapshot exists — nothing to record here.
                 continue;
             }
 
             if (_timeProvider.GetUtcNow() - snapshot.CapturedAt > _options.EffectiveMaxQuoteAge
                 && _options.RefuseStaleQuotes)
             {
-                await MarkAttemptedAsync(entry.TransactionHash, stoppingToken).ConfigureAwait(false);
+                // Transient for the same reason: the next successful refresh clears this on its own.
                 continue;
             }
 
@@ -123,14 +131,23 @@ internal sealed class ValuationWorker : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "pricing payment {Hash} failed; it stays queued", entry.TransactionHash);
-                await MarkAttemptedAsync(entry.TransactionHash, stoppingToken).ConfigureAwait(false);
+                // Per-entry and deterministic: the same amount against the same snapshot throws the same
+                // way every time, so leaving it queued would only spend the next pass reproducing this one.
+                // Terminal.
+                _logger.LogError(ex, "pricing payment {Hash} failed", entry.TransactionHash);
+                await FailAsync(entry.TransactionHash, $"pricing threw: {ex.Message}", stoppingToken)
+                    .ConfigureAwait(false);
                 continue;
             }
 
             if (result is null)
             {
-                await MarkAttemptedAsync(entry.TransactionHash, stoppingToken).ConfigureAwait(false);
+                // The pair currently has no liquidity to trade this amount against. Terminal: nothing
+                // retries this on a timer, and an operator — see IFailedValuationAdmin — is what moves it
+                // on from here, whether that means pricing it manually once liquidity is known some other
+                // way, or writing it off.
+                await FailAsync(entry.TransactionHash, "the pair currently has no liquidity", stoppingToken)
+                    .ConfigureAwait(false);
                 continue;
             }
 
@@ -145,24 +162,26 @@ internal sealed class ValuationWorker : BackgroundService
             catch (Exception ex)
             {
                 // Same failure class the evaluation catch above guards against, one line later: a store
-                // that rejects this particular write (a decimal a column cannot hold, say) must not stop
-                // the payment behind it from being reached.
-                _logger.LogError(ex, "saving the valuation of {Hash} failed; it stays queued", entry.TransactionHash);
-                await MarkAttemptedAsync(entry.TransactionHash, stoppingToken).ConfigureAwait(false);
+                // that rejects this particular row (a decimal a column cannot hold, say) will reject it
+                // again next pass too. Terminal.
+                _logger.LogError(ex, "saving the valuation of {Hash} failed", entry.TransactionHash);
+                await FailAsync(
+                        entry.TransactionHash, $"the store rejected the valuation: {ex.Message}", stoppingToken)
+                    .ConfigureAwait(false);
             }
         }
     }
 
     /// <summary>
-    /// Stamps the attempt so a pending entry that cannot be priced rotates to the back of the queue
-    /// instead of pinning its head. A failure here is logged and swallowed like any other store hiccup on
-    /// this path: the entry stays queued and simply gets another chance next pass.
+    /// Moves a pending entry to <see cref="ValuationState.Failed"/> for a per-entry, non-transient cause.
+    /// A failure here — the store rejecting the failure write itself — is logged and swallowed like any
+    /// other store hiccup on this path: the entry simply stays queued and gets another chance next pass.
     /// </summary>
-    private async Task MarkAttemptedAsync(string transactionHash, CancellationToken stoppingToken)
+    private async Task FailAsync(string transactionHash, string reason, CancellationToken stoppingToken)
     {
         try
         {
-            await _quotes.MarkValuationAttemptedAsync(transactionHash, _timeProvider.GetUtcNow(), stoppingToken)
+            await _quotes.SaveValuationFailureAsync(transactionHash, reason, _timeProvider.GetUtcNow(), stoppingToken)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -171,7 +190,7 @@ internal sealed class ValuationWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "recording an attempt for {Hash} failed", transactionHash);
+            _logger.LogError(ex, "recording the failure of {Hash} failed; it stays queued", transactionHash);
         }
     }
 
@@ -223,8 +242,9 @@ internal sealed class ValuationWorker : BackgroundService
                 await _quotes.MarkValuationDeliveredAsync(entry.TransactionHash, stoppingToken).ConfigureAwait(false);
 
                 _logger.LogInformation(
-                    "payment {Hash} valued at {Quote} (buyer {Buyer})",
+                    "payment {Hash} reached {State} (quote {Quote}, buyer {Buyer})",
                     entry.TransactionHash,
+                    entry.State,
                     entry.QuoteAmount,
                     buyerId ?? "unknown");
             }
@@ -251,6 +271,7 @@ internal sealed class ValuationWorker : BackgroundService
             PaymentLedgerIndex = entry.PaymentLedgerIndex,
             DestinationTag = entry.DestinationTag,
             EnqueuedAt = entry.EnqueuedAt,
+            State = ValuationState.Valued,
             ValuedAt = _timeProvider.GetUtcNow(),
             QuoteAmount = result.OutputAmount,
             EffectivePrice = result.EffectivePrice,

@@ -26,39 +26,73 @@ public interface IQuoteStore
     /// <summary>Every stored reading.</summary>
     Task<IReadOnlyList<StoredQuote>> GetQuotesAsync(CancellationToken cancellationToken);
 
-    /// <summary>Queues a payment for valuation. Returns false when the hash is already queued or valued.</summary>
+    /// <summary>Queues a payment for valuation. Returns false when the hash is already queued or resolved.</summary>
     Task<bool> TryEnqueueValuationAsync(PaymentValuation pending, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Up to <paramref name="limit"/> queued but not yet valued entries.
+    /// Up to <paramref name="limit"/> entries in <see cref="ValuationState.Pending"/>, oldest enqueued
+    /// first.
     /// </summary>
-    /// <remarks>
-    /// The ordering is load-bearing, not incidental: never-attempted entries come before ever-attempted
-    /// ones, ever-attempted entries are ordered by <see cref="PaymentValuation.LastAttemptAt"/> ascending
-    /// (least-recently-attempted first), and entries tied on that — including every never-attempted entry,
-    /// which all tie — are ordered by enqueue time. An entry that can never be priced is then tried once
-    /// per sweep of the queue and moves to the back, rather than occupying the head forever and starving
-    /// everything queued behind it.
-    /// </remarks>
     Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Stamps <see cref="PaymentValuation.LastAttemptAt"/> for an entry, without changing anything else
-    /// about it. Called for every pending entry a pricing pass looked at, whether or not it could be priced,
-    /// so that <see cref="GetPendingValuationsAsync"/> can rotate past entries it cannot resolve. A no-op
-    /// when the hash is not queued or has already been valued.
+    /// Replaces a <see cref="ValuationState.Pending"/> or <see cref="ValuationState.Failed"/> entry with its
+    /// computed valuation — <see cref="PaymentValuation.State"/> on <paramref name="valuation"/> says which
+    /// of <see cref="ValuationState.Valued"/> (the automatic pipeline) or <see cref="ValuationState.ValuedManually"/>
+    /// (an operator, via <see cref="IFailedValuationAdmin"/>) it is. Moving on from
+    /// <see cref="ValuationState.Failed"/> clears <see cref="PaymentValuation.FailedAt"/> and
+    /// <see cref="PaymentValuation.FailureReason"/> — the entry is resolved now, not failed and valued at
+    /// once.
     /// </summary>
-    Task MarkValuationAttemptedAsync(string transactionHash, DateTimeOffset attemptedAt, CancellationToken cancellationToken);
-
-    /// <summary>Replaces a queued entry with its computed valuation.</summary>
     Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken);
 
-    /// <summary>Up to <paramref name="limit"/> valued but undelivered entries, oldest first.</summary>
+    /// <summary>
+    /// Moves a <see cref="ValuationState.Pending"/> entry to <see cref="ValuationState.Failed"/> for good —
+    /// it leaves the pending queue and is never retried automatically. Reserved for a per-entry,
+    /// non-transient cause; see <see cref="PaymentValuation.FailedAt"/>.
+    /// </summary>
+    /// <param name="transactionHash">The pending entry to fail.</param>
+    /// <param name="reason">
+    /// Specific enough for an operator to act on: which cause it was, and the exception message where the
+    /// cause was an exception.
+    /// </param>
+    /// <param name="failedAt">When it failed.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    Task SaveValuationFailureAsync(
+        string transactionHash, string reason, DateTimeOffset failedAt, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Moves a <see cref="ValuationState.Failed"/> entry to <see cref="ValuationState.WrittenOff"/> for
+    /// good, at an operator's decision through <see cref="IFailedValuationAdmin"/>.
+    /// </summary>
+    Task SaveWriteOffAsync(
+        string transactionHash, string reason, DateTimeOffset writtenOffAt, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Up to <paramref name="limit"/> entries in <see cref="ValuationState.Failed"/>, oldest-failed first,
+    /// after skipping <paramref name="offset"/> of them. What <see cref="IFailedValuationAdmin.ListFailedAsync"/>
+    /// pages through.
+    /// </summary>
+    Task<IReadOnlyList<PaymentValuation>> GetFailedValuationsAsync(
+        int limit, int offset, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// How many entries are in <see cref="ValuationState.Failed"/> right now — the count an admin screen or
+    /// a health report wants without paging through the whole list.
+    /// </summary>
+    Task<int> CountFailedValuationsAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Up to <paramref name="limit"/> entries past <see cref="ValuationState.Pending"/> that have not
+    /// reached the host handler yet, oldest first — <see cref="ValuationState.Valued"/> and
+    /// <see cref="ValuationState.ValuedManually"/> alongside <see cref="ValuationState.Failed"/> and
+    /// <see cref="ValuationState.WrittenOff"/>: the host learns about all four, not only a successful price.
+    /// </summary>
     Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken);
 
     /// <summary>Marks a valuation as delivered to the host handler.</summary>
     Task MarkValuationDeliveredAsync(string transactionHash, CancellationToken cancellationToken);
 
-    /// <summary>The valuation for one payment, queued or complete, or null when there is none.</summary>
+    /// <summary>The valuation for one payment, in any state, or null when there is none.</summary>
     Task<PaymentValuation?> GetValuationAsync(string transactionHash, CancellationToken cancellationToken);
 }

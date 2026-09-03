@@ -17,11 +17,21 @@ namespace Xrpl.PaymentGateway.Abstractions;
 /// money arriving, which is the one dependency the gateway refuses to create.
 /// Delivery is at least once, so implementations must be idempotent.
 /// </para>
+/// <para>
+/// A <c>valuation</c> here is not always priced. Its <see cref="PaymentValuation.State"/> can
+/// be <see cref="ValuationState.Failed"/> — the automatic pipeline could not price it and it now waits on
+/// an operator, see <see cref="IFailedValuationAdmin"/> — or <see cref="ValuationState.WrittenOff"/> — an
+/// operator looked at it and decided it will never be credited. Both carry
+/// <see cref="PaymentValuation.FailureReason"/> and no <see cref="PaymentValuation.QuoteAmount"/>. This is
+/// how a host learns to tell the buyer that funds arrived but could not be valued (<c>Failed</c>) or that
+/// the case has been closed (<c>WrittenOff</c>), instead of leaving the buyer with no news at all. Only
+/// <see cref="ValuationState.Valued"/> and <see cref="ValuationState.ValuedManually"/> carry a real number.
+/// </para>
 /// </remarks>
 public interface IPaymentValuedHandler
 {
     /// <summary>
-    /// Hands the host a completed valuation and the buyer it belongs to.
+    /// Hands the host a completed, failed, or written-off valuation and the buyer it belongs to.
     /// </summary>
     /// <remarks>
     /// The payment record itself is not passed: <see cref="IPaymentStore"/> offers no lookup by hash and

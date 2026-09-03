@@ -57,7 +57,7 @@ public sealed class PostgresQuoteStore : IQuoteStore
                 payment_ledger_index  BIGINT      NOT NULL,
                 destination_tag       BIGINT      NULL,
                 enqueued_at           TIMESTAMPTZ NOT NULL,
-                last_attempt_at       TIMESTAMPTZ NULL,
+                state                 INTEGER     NOT NULL DEFAULT 0,
                 valued_at             TIMESTAMPTZ NULL,
                 quote_amount          NUMERIC     NULL,
                 effective_price       NUMERIC     NULL,
@@ -68,22 +68,43 @@ public sealed class PostgresQuoteStore : IQuoteStore
                 route                 TEXT        NULL,
                 snapshot_ledger_index BIGINT      NULL,
                 snapshot_captured_at  TIMESTAMPTZ NULL,
+                failed_at             TIMESTAMPTZ NULL,
+                failure_reason        TEXT        NULL,
+                written_off_at        TIMESTAMPTZ NULL,
+                write_off_reason      TEXT        NULL,
                 delivered             BOOLEAN     NOT NULL DEFAULT FALSE
             );
 
+            -- EnsureSchemaAsync is the whole migration story for this store, not just table creation: on
+            -- a database where "valuations" already existed before a column below was introduced, the
+            -- CREATE TABLE IF NOT EXISTS above is a no-op and would otherwise leave it missing, so every
+            -- valuation query naming it fails from then on. Must run before the indexes below, which name
+            -- "state" and "failed_at" in their predicate — on a table that predates those columns, an index
+            -- built before this would fail with "column does not exist" the same way a query would.
+            ALTER TABLE "{_schema}".valuations ADD COLUMN IF NOT EXISTS state INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE "{_schema}".valuations ADD COLUMN IF NOT EXISTS failed_at TIMESTAMPTZ NULL;
+            ALTER TABLE "{_schema}".valuations ADD COLUMN IF NOT EXISTS failure_reason TEXT NULL;
+            ALTER TABLE "{_schema}".valuations ADD COLUMN IF NOT EXISTS written_off_at TIMESTAMPTZ NULL;
+            ALTER TABLE "{_schema}".valuations ADD COLUMN IF NOT EXISTS write_off_reason TEXT NULL;
+
+            -- Backfill for a table that predates the "state" column: ADD COLUMN above defaults every
+            -- existing row to 0 (Pending), which is right for a row that was never priced but wrong for
+            -- one that was — before this column existed, the only way to reach valued_at was the automatic
+            -- pipeline, so a non-null valued_at means Valued (1). Idempotent: once a row is migrated its
+            -- state is no longer 0, so a later run touches nothing.
+            UPDATE "{_schema}".valuations SET state = 1 WHERE state = 0 AND valued_at IS NOT NULL;
+
             -- Partial indexes: both queues are short and the table is not, so a full scan per poll
-            -- would grow with history rather than with work outstanding.
+            -- would grow with history rather than with work outstanding. State values are
+            -- ValuationState's ordinals: 0 Pending, 1 Valued, 2 ValuedManually, 3 Failed, 4 WrittenOff.
             CREATE INDEX IF NOT EXISTS valuations_pending
-                ON "{_schema}".valuations (queued_seq) WHERE valued_at IS NULL;
+                ON "{_schema}".valuations (queued_seq) WHERE state = 0;
 
             CREATE INDEX IF NOT EXISTS valuations_undelivered
-                ON "{_schema}".valuations (queued_seq) WHERE valued_at IS NOT NULL AND delivered = FALSE;
+                ON "{_schema}".valuations (queued_seq) WHERE state <> 0 AND delivered = FALSE;
 
-            -- EnsureSchemaAsync is the whole migration story for this store, not just table creation: on
-            -- a database where "valuations" already existed before last_attempt_at was introduced, the
-            -- CREATE TABLE IF NOT EXISTS above is a no-op and would otherwise leave the column missing,
-            -- so every valuation query fails with "column last_attempt_at does not exist" from then on.
-            ALTER TABLE "{_schema}".valuations ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ NULL;
+            CREATE INDEX IF NOT EXISTS valuations_failed
+                ON "{_schema}".valuations (failed_at, queued_seq) WHERE state = 3;
             """;
 
         await using NpgsqlCommand command = new NpgsqlCommand(sql, connection);
@@ -188,29 +209,7 @@ public sealed class PostgresQuoteStore : IQuoteStore
     }
 
     public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken) =>
-        // Ordered by when the entry was last considered, treating "never attempted" as its enqueue time
-        // (COALESCE), with enqueue order as the final tiebreak. "Never-attempted first" looks like the
-        // same fairness rule but is not: it demotes any entry below every payment queued after its one
-        // attempt, so once arrivals keep the never-attempted group at or above the batch size the
-        // stamped backlog is never fetched again — the same starvation, just moved to the whole attempted
-        // set. Ordering by COALESCE(last_attempt_at, enqueued_at) makes a stamped entry compete on its own
-        // stamp and a fresh arrival compete on its enqueue time, so neither group can lock the other out.
-        QueryValuationsAsync(
-            "valued_at IS NULL", "COALESCE(last_attempt_at, enqueued_at), queued_seq", limit, cancellationToken);
-
-    public async Task MarkValuationAttemptedAsync(string transactionHash, DateTimeOffset attemptedAt, CancellationToken cancellationToken)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(transactionHash);
-
-        await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using NpgsqlCommand command = new NpgsqlCommand(
-            $"""UPDATE "{_schema}".valuations SET last_attempt_at = @attempted WHERE transaction_hash = @hash""",
-            connection);
-        command.Parameters.AddWithValue("hash", transactionHash);
-        command.Parameters.AddWithValue("attempted", attemptedAt);
-
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-    }
+        QueryValuationsAsync(StateFilter(ValuationState.Pending), "queued_seq", limit, offset: 0, cancellationToken);
 
     public async Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken)
     {
@@ -220,6 +219,7 @@ public sealed class PostgresQuoteStore : IQuoteStore
         await using NpgsqlCommand command = new NpgsqlCommand(
             $"""
             UPDATE "{_schema}".valuations SET
+                state = @state,
                 valued_at = @valued,
                 quote_amount = @quote,
                 effective_price = @effective,
@@ -229,12 +229,15 @@ public sealed class PostgresQuoteStore : IQuoteStore
                 book_truncated = @truncated,
                 route = @route,
                 snapshot_ledger_index = @snapLedger,
-                snapshot_captured_at = @snapAt
+                snapshot_captured_at = @snapAt,
+                failed_at = NULL,
+                failure_reason = NULL
             WHERE transaction_hash = @hash
             """,
             connection);
 
         command.Parameters.AddWithValue("hash", valuation.TransactionHash);
+        command.Parameters.AddWithValue("state", (int)valuation.State);
         command.Parameters.AddWithValue("valued", (object?)valuation.ValuedAt ?? DBNull.Value);
         command.Parameters.AddWithValue("quote", (object?)valuation.QuoteAmount ?? DBNull.Value);
         command.Parameters.AddWithValue("effective", (object?)valuation.EffectivePrice ?? DBNull.Value);
@@ -250,8 +253,82 @@ public sealed class PostgresQuoteStore : IQuoteStore
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task SaveValuationFailureAsync(
+        string transactionHash, string reason, DateTimeOffset failedAt, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(transactionHash);
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+
+        await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using NpgsqlCommand command = new NpgsqlCommand(
+            $"""
+            UPDATE "{_schema}".valuations SET
+                state = @failedState,
+                failed_at = @failedAt,
+                failure_reason = @reason
+            WHERE transaction_hash = @hash AND state = @pendingState
+            """,
+            connection);
+
+        command.Parameters.AddWithValue("hash", transactionHash);
+        command.Parameters.AddWithValue("failedState", (int)ValuationState.Failed);
+        command.Parameters.AddWithValue("pendingState", (int)ValuationState.Pending);
+        command.Parameters.AddWithValue("failedAt", failedAt);
+        command.Parameters.AddWithValue("reason", reason);
+
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task SaveWriteOffAsync(
+        string transactionHash, string reason, DateTimeOffset writtenOffAt, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(transactionHash);
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+
+        await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using NpgsqlCommand command = new NpgsqlCommand(
+            $"""
+            UPDATE "{_schema}".valuations SET
+                state = @writtenOffState,
+                written_off_at = @writtenOffAt,
+                write_off_reason = @reason
+            WHERE transaction_hash = @hash AND state = @failedState
+            """,
+            connection);
+
+        command.Parameters.AddWithValue("hash", transactionHash);
+        command.Parameters.AddWithValue("writtenOffState", (int)ValuationState.WrittenOff);
+        command.Parameters.AddWithValue("failedState", (int)ValuationState.Failed);
+        command.Parameters.AddWithValue("writtenOffAt", writtenOffAt);
+        command.Parameters.AddWithValue("reason", reason);
+
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task<IReadOnlyList<PaymentValuation>> GetFailedValuationsAsync(
+        int limit, int offset, CancellationToken cancellationToken) =>
+        QueryValuationsAsync(StateFilter(ValuationState.Failed), "failed_at, queued_seq", limit, offset, cancellationToken);
+
+    public async Task<int> CountFailedValuationsAsync(CancellationToken cancellationToken)
+    {
+        await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using NpgsqlCommand command = new NpgsqlCommand(
+            $"""SELECT COUNT(*) FROM "{_schema}".valuations WHERE {StateFilter(ValuationState.Failed)}""", connection);
+
+        object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        return (int)(long)result!;
+    }
+
     public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) =>
-        QueryValuationsAsync("valued_at IS NOT NULL AND delivered = FALSE", "queued_seq", limit, cancellationToken);
+        QueryValuationsAsync(
+            $"state <> {(int)ValuationState.Pending} AND delivered = FALSE", "queued_seq", limit, offset: 0, cancellationToken);
+
+    /// <summary>A SQL predicate on the "state" column for one <see cref="ValuationState"/>.</summary>
+    /// <remarks>
+    /// Interpolated directly rather than parameterized: the value always comes from this enum, never from
+    /// a caller, so there is nothing here for a parameter to protect against.
+    /// </remarks>
+    private static string StateFilter(ValuationState state) => $"state = {(int)state}";
 
     public async Task MarkValuationDeliveredAsync(string transactionHash, CancellationToken cancellationToken)
     {
@@ -284,16 +361,19 @@ public sealed class PostgresQuoteStore : IQuoteStore
 
     private const string ValuationColumns =
         "transaction_hash, pair_key, amount, payment_ledger_index, destination_tag, enqueued_at, " +
-        "last_attempt_at, valued_at, quote_amount, effective_price, marginal_price, slippage_percent, " +
-        "fully_filled, book_truncated, route, snapshot_ledger_index, snapshot_captured_at, delivered";
+        "state, valued_at, quote_amount, effective_price, marginal_price, slippage_percent, " +
+        "fully_filled, book_truncated, route, snapshot_ledger_index, snapshot_captured_at, " +
+        "failed_at, failure_reason, written_off_at, write_off_reason, delivered";
 
     private async Task<IReadOnlyList<PaymentValuation>> QueryValuationsAsync(
         string predicate,
         string orderBy,
         int limit,
+        int offset,
         CancellationToken cancellationToken)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
 
         await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using NpgsqlCommand command = new NpgsqlCommand(
@@ -301,10 +381,11 @@ public sealed class PostgresQuoteStore : IQuoteStore
             SELECT {ValuationColumns} FROM "{_schema}".valuations
             WHERE {predicate}
             ORDER BY {orderBy}
-            LIMIT @limit
+            LIMIT @limit OFFSET @offset
             """,
             connection);
         command.Parameters.AddWithValue("limit", limit);
+        command.Parameters.AddWithValue("offset", offset);
 
         List<PaymentValuation> result = new List<PaymentValuation>();
         await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -339,7 +420,7 @@ public sealed class PostgresQuoteStore : IQuoteStore
         PaymentLedgerIndex = (uint)reader.GetInt64(3),
         DestinationTag = reader.IsDBNull(4) ? null : (uint)reader.GetInt64(4),
         EnqueuedAt = reader.GetFieldValue<DateTimeOffset>(5),
-        LastAttemptAt = reader.IsDBNull(6) ? null : reader.GetFieldValue<DateTimeOffset>(6),
+        State = (ValuationState)reader.GetInt32(6),
         ValuedAt = reader.IsDBNull(7) ? null : reader.GetFieldValue<DateTimeOffset>(7),
         QuoteAmount = reader.IsDBNull(8) ? null : reader.GetDecimal(8),
         EffectivePrice = reader.IsDBNull(9) ? null : reader.GetDecimal(9),
@@ -350,7 +431,11 @@ public sealed class PostgresQuoteStore : IQuoteStore
         Route = reader.IsDBNull(14) ? null : reader.GetString(14),
         SnapshotLedgerIndex = reader.IsDBNull(15) ? null : (uint)reader.GetInt64(15),
         SnapshotCapturedAt = reader.IsDBNull(16) ? null : reader.GetFieldValue<DateTimeOffset>(16),
-        Delivered = reader.GetBoolean(17),
+        FailedAt = reader.IsDBNull(17) ? null : reader.GetFieldValue<DateTimeOffset>(17),
+        FailureReason = reader.IsDBNull(18) ? null : reader.GetString(18),
+        WrittenOffAt = reader.IsDBNull(19) ? null : reader.GetFieldValue<DateTimeOffset>(19),
+        WriteOffReason = reader.IsDBNull(20) ? null : reader.GetString(20),
+        Delivered = reader.GetBoolean(21),
     };
 
     private async Task<NpgsqlConnection> OpenAsync(CancellationToken cancellationToken)

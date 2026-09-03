@@ -34,47 +34,106 @@ public sealed class PaymentValuation
     public required DateTimeOffset EnqueuedAt { get; init; }
 
     /// <summary>
-    /// When pricing this entry was last attempted, successfully or not. Null while it has never been
-    /// tried. Drives the fairness ordering of <see cref="IQuoteStore.GetPendingValuationsAsync"/>: without
-    /// it, an entry that can never be priced — its pair was removed from configuration, its evaluation
-    /// throws deterministically, its save is rejected by the store — would occupy the head of an
-    /// oldest-first queue forever and starve every payment queued behind it.
+    /// What stage this entry is at. Defaults to <see cref="ValuationState.Pending"/>, which is what a
+    /// freshly queued entry is.
     /// </summary>
-    public DateTimeOffset? LastAttemptAt { get; init; }
+    public ValuationState State { get; init; } = ValuationState.Pending;
 
-    /// <summary>When the valuation was computed. Null while it is still queued.</summary>
+    /// <summary>
+    /// When the valuation was computed, automatically or by an operator. Null while queued or failed.
+    /// </summary>
     public DateTimeOffset? ValuedAt { get; init; }
 
-    /// <summary>Value in the quote asset. Null while queued.</summary>
+    /// <summary>
+    /// Value in the quote asset. Null until <see cref="State"/> is <see cref="ValuationState.Valued"/> or
+    /// <see cref="ValuationState.ValuedManually"/>.
+    /// </summary>
     public decimal? QuoteAmount { get; init; }
 
-    /// <summary>Price actually achieved for this size.</summary>
+    /// <summary>
+    /// Price actually achieved for this size. For <see cref="ValuationState.ValuedManually"/> this is the
+    /// rate the operator supplied.
+    /// </summary>
     public decimal? EffectivePrice { get; init; }
 
-    /// <summary>Marginal price of the snapshot used.</summary>
+    /// <summary>
+    /// Marginal price of the snapshot used. Null for <see cref="ValuationState.ValuedManually"/> — no
+    /// snapshot is involved in an operator's price.
+    /// </summary>
     public decimal? MarginalPrice { get; init; }
 
     /// <summary>How much worse the achieved price was than the marginal one, in percent.</summary>
     public decimal? SlippagePercent { get; init; }
 
-    /// <summary>Whether the whole received amount could be traded against the snapshot.</summary>
+    /// <summary>
+    /// Whether the whole received amount could be traded against the snapshot. Always true for
+    /// <see cref="ValuationState.ValuedManually"/> — an operator's rate prices the full recorded amount.
+    /// </summary>
     public bool FullyFilled { get; init; }
 
     /// <summary>Whether the snapshot's book may have run deeper than what was priced.</summary>
     public bool BookTruncated { get; init; }
 
-    /// <summary>Assets the route went through.</summary>
+    /// <summary>Assets the route went through. Null for <see cref="ValuationState.ValuedManually"/>.</summary>
     public string? Route { get; init; }
 
-    /// <summary>Ledger the snapshot was captured at. This is what makes an old valuation checkable.</summary>
+    /// <summary>
+    /// Ledger the snapshot was captured at. This is what makes an old automatic valuation checkable. Null
+    /// for <see cref="ValuationState.ValuedManually"/>.
+    /// </summary>
     public uint? SnapshotLedgerIndex { get; init; }
 
-    /// <summary>When the snapshot was captured.</summary>
+    /// <summary>When the snapshot was captured. Null for <see cref="ValuationState.ValuedManually"/>.</summary>
     public DateTimeOffset? SnapshotCapturedAt { get; init; }
 
-    /// <summary>Whether the valuation has reached the host handler.</summary>
+    /// <summary>
+    /// Whether the valuation has reached the host handler. Applies to every non-<see cref="ValuationState.Pending"/>
+    /// state: <see cref="IPaymentValuedHandler"/> is handed a <see cref="ValuationState.Failed"/> and a
+    /// <see cref="ValuationState.WrittenOff"/> entry too, not only a priced one, so the host can tell the
+    /// buyer what happened instead of nothing at all.
+    /// </summary>
     public bool Delivered { get; init; }
 
-    /// <summary>Whether a value has been computed yet.</summary>
-    public bool IsValued => ValuedAt is not null;
+    /// <summary>
+    /// When this entry reached <see cref="ValuationState.Failed"/>. Null otherwise.
+    /// </summary>
+    /// <remarks>
+    /// Reached only for a per-entry, non-transient cause: the pair it names is no longer configured,
+    /// pricing it threw, the pair currently has no liquidity to price against, or the store rejected this
+    /// specific row on save. A missing or stale snapshot is neither — it is transient and shared by every
+    /// entry against that pair — so it never fails an entry; the entry simply stays
+    /// <see cref="ValuationState.Pending"/> until a snapshot arrives. There is deliberately no retry counter
+    /// or backoff behind this: a cause that terminates is, by definition, one another attempt cannot fix on
+    /// its own — an operator, through <see cref="IFailedValuationAdmin"/>, is what moves it on from here.
+    /// </remarks>
+    public DateTimeOffset? FailedAt { get; init; }
+
+    /// <summary>
+    /// Why this entry failed, specific enough for an operator to act on: which cause it was, and the
+    /// exception message where the cause was an exception. Null unless <see cref="State"/> is
+    /// <see cref="ValuationState.Failed"/> or <see cref="ValuationState.WrittenOff"/> — a write-off keeps
+    /// the reason it originally failed for, alongside <see cref="WriteOffReason"/>, the operator's own.
+    /// </summary>
+    public string? FailureReason { get; init; }
+
+    /// <summary>When an operator moved this entry to <see cref="ValuationState.WrittenOff"/>. Null otherwise.</summary>
+    public DateTimeOffset? WrittenOffAt { get; init; }
+
+    /// <summary>
+    /// The reason an operator supplied for writing this entry off — dust, a spam token, a mistaken
+    /// transfer. Null unless <see cref="State"/> is <see cref="ValuationState.WrittenOff"/>.
+    /// </summary>
+    public string? WriteOffReason { get; init; }
+
+    /// <summary>Whether this entry is still queued and unpriced.</summary>
+    public bool IsPending => State == ValuationState.Pending;
+
+    /// <summary>Whether a value has been computed, automatically or by an operator.</summary>
+    public bool IsValued => State is ValuationState.Valued or ValuationState.ValuedManually;
+
+    /// <summary>Whether this entry could not be priced and is waiting on an operator.</summary>
+    public bool IsFailed => State == ValuationState.Failed;
+
+    /// <summary>Whether an operator decided this entry will never be priced or credited.</summary>
+    public bool IsWrittenOff => State == ValuationState.WrittenOff;
 }

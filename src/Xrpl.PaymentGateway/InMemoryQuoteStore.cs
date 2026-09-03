@@ -66,36 +66,15 @@ public sealed class InMemoryQuoteStore : IQuoteStore
 
         lock (_gate)
         {
-            // Ordered by when the entry was last considered, treating "never attempted" as its enqueue
-            // time. "Never-attempted first" looks like the same fairness rule but is not: it demotes any
-            // entry below every payment queued after its one attempt, so once arrivals keep the
-            // never-attempted group at or above the batch size the stamped backlog is never fetched
-            // again. A stable OrderBy over _order (already enqueue-ordered) makes enqueue time the
-            // tiebreak for free, matching queued_seq in the SQL store.
+            // _order is already enqueue-ordered, so a plain filter over it is oldest-enqueued first.
             List<PaymentValuation> result = _order
                 .Select(hash => _valuations[hash])
-                .Where(entry => !entry.IsValued)
-                .OrderBy(entry => entry.LastAttemptAt ?? entry.EnqueuedAt)
+                .Where(entry => entry.State == ValuationState.Pending)
                 .Take(limit)
                 .ToList();
 
             return Task.FromResult<IReadOnlyList<PaymentValuation>>(result);
         }
-    }
-
-    public Task MarkValuationAttemptedAsync(string transactionHash, DateTimeOffset attemptedAt, CancellationToken cancellationToken)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(transactionHash);
-
-        lock (_gate)
-        {
-            if (_valuations.TryGetValue(transactionHash, out PaymentValuation? entry))
-            {
-                _valuations[transactionHash] = WithAttempt(entry, attemptedAt);
-            }
-        }
-
-        return Task.CompletedTask;
     }
 
     public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken)
@@ -104,6 +83,9 @@ public sealed class InMemoryQuoteStore : IQuoteStore
 
         lock (_gate)
         {
+            // A whole-object replace, so a caller moving an entry on from Failed simply builds the new
+            // Valued/ValuedManually valuation without FailedAt/FailureReason set — there is nothing here
+            // that needs to clear them separately.
             if (_valuations.ContainsKey(valuation.TransactionHash))
             {
                 _valuations[valuation.TransactionHash] = valuation;
@@ -113,8 +95,69 @@ public sealed class InMemoryQuoteStore : IQuoteStore
         return Task.CompletedTask;
     }
 
+    public Task SaveValuationFailureAsync(
+        string transactionHash, string reason, DateTimeOffset failedAt, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(transactionHash);
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+
+        lock (_gate)
+        {
+            if (_valuations.TryGetValue(transactionHash, out PaymentValuation? entry) && entry.State == ValuationState.Pending)
+            {
+                _valuations[transactionHash] = WithFailure(entry, reason, failedAt);
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task SaveWriteOffAsync(
+        string transactionHash, string reason, DateTimeOffset writtenOffAt, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(transactionHash);
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+
+        lock (_gate)
+        {
+            if (_valuations.TryGetValue(transactionHash, out PaymentValuation? entry) && entry.State == ValuationState.Failed)
+            {
+                _valuations[transactionHash] = WithWriteOff(entry, reason, writtenOffAt);
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<PaymentValuation>> GetFailedValuationsAsync(
+        int limit, int offset, CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+
+        lock (_gate)
+        {
+            List<PaymentValuation> result = _order
+                .Select(hash => _valuations[hash])
+                .Where(entry => entry.State == ValuationState.Failed)
+                .Skip(offset)
+                .Take(limit)
+                .ToList();
+
+            return Task.FromResult<IReadOnlyList<PaymentValuation>>(result);
+        }
+    }
+
+    public Task<int> CountFailedValuationsAsync(CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            return Task.FromResult(_valuations.Values.Count(entry => entry.State == ValuationState.Failed));
+        }
+    }
+
     public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) =>
-        Task.FromResult(Take(limit, entry => entry.IsValued && !entry.Delivered));
+        Task.FromResult(Take(limit, entry => entry.State != ValuationState.Pending && !entry.Delivered));
 
     public Task MarkValuationDeliveredAsync(string transactionHash, CancellationToken cancellationToken)
     {
@@ -175,7 +218,7 @@ public sealed class InMemoryQuoteStore : IQuoteStore
         PaymentLedgerIndex = entry.PaymentLedgerIndex,
         DestinationTag = entry.DestinationTag,
         EnqueuedAt = entry.EnqueuedAt,
-        LastAttemptAt = entry.LastAttemptAt,
+        State = entry.State,
         ValuedAt = entry.ValuedAt,
         QuoteAmount = entry.QuoteAmount,
         EffectivePrice = entry.EffectivePrice,
@@ -186,10 +229,14 @@ public sealed class InMemoryQuoteStore : IQuoteStore
         Route = entry.Route,
         SnapshotLedgerIndex = entry.SnapshotLedgerIndex,
         SnapshotCapturedAt = entry.SnapshotCapturedAt,
+        FailedAt = entry.FailedAt,
+        FailureReason = entry.FailureReason,
+        WrittenOffAt = entry.WrittenOffAt,
+        WriteOffReason = entry.WriteOffReason,
         Delivered = true,
     };
 
-    private static PaymentValuation WithAttempt(PaymentValuation entry, DateTimeOffset attemptedAt) => new PaymentValuation
+    private static PaymentValuation WithFailure(PaymentValuation entry, string reason, DateTimeOffset failedAt) => new PaymentValuation
     {
         TransactionHash = entry.TransactionHash,
         PairKey = entry.PairKey,
@@ -197,17 +244,25 @@ public sealed class InMemoryQuoteStore : IQuoteStore
         PaymentLedgerIndex = entry.PaymentLedgerIndex,
         DestinationTag = entry.DestinationTag,
         EnqueuedAt = entry.EnqueuedAt,
-        LastAttemptAt = attemptedAt,
-        ValuedAt = entry.ValuedAt,
-        QuoteAmount = entry.QuoteAmount,
-        EffectivePrice = entry.EffectivePrice,
-        MarginalPrice = entry.MarginalPrice,
-        SlippagePercent = entry.SlippagePercent,
-        FullyFilled = entry.FullyFilled,
-        BookTruncated = entry.BookTruncated,
-        Route = entry.Route,
-        SnapshotLedgerIndex = entry.SnapshotLedgerIndex,
-        SnapshotCapturedAt = entry.SnapshotCapturedAt,
-        Delivered = entry.Delivered,
+        State = ValuationState.Failed,
+        FailedAt = failedAt,
+        FailureReason = reason,
+        Delivered = false,
+    };
+
+    private static PaymentValuation WithWriteOff(PaymentValuation entry, string reason, DateTimeOffset writtenOffAt) => new PaymentValuation
+    {
+        TransactionHash = entry.TransactionHash,
+        PairKey = entry.PairKey,
+        Amount = entry.Amount,
+        PaymentLedgerIndex = entry.PaymentLedgerIndex,
+        DestinationTag = entry.DestinationTag,
+        EnqueuedAt = entry.EnqueuedAt,
+        State = ValuationState.WrittenOff,
+        FailedAt = entry.FailedAt,
+        FailureReason = entry.FailureReason,
+        WrittenOffAt = writtenOffAt,
+        WriteOffReason = reason,
+        Delivered = false,
     };
 }
