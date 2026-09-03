@@ -35,12 +35,12 @@ public sealed class FlakyQuoteStore : IQuoteStore
     public Task<IReadOnlyList<PendingValuationsByPair>> GetPendingValuationBreakdownAsync(CancellationToken cancellationToken) =>
         _inner.GetPendingValuationBreakdownAsync(cancellationToken);
 
-    public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken)
+    public Task<bool> SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken)
     {
         if (string.Equals(valuation.TransactionHash, _failingHash, StringComparison.Ordinal) && _remainingFailures > 0)
         {
             _remainingFailures--;
-            return Task.FromException(new InvalidOperationException("quote store rejected the write"));
+            return Task.FromException<bool>(new InvalidOperationException("quote store rejected the write"));
         }
 
         return _inner.SaveValuationAsync(valuation, cancellationToken);
@@ -50,7 +50,7 @@ public sealed class FlakyQuoteStore : IQuoteStore
         string transactionHash, string reason, DateTimeOffset failedAt, CancellationToken cancellationToken) =>
         _inner.SaveValuationFailureAsync(transactionHash, reason, failedAt, cancellationToken);
 
-    public Task SaveWriteOffAsync(
+    public Task<bool> SaveWriteOffAsync(
         string transactionHash, string reason, DateTimeOffset writtenOffAt, CancellationToken cancellationToken) =>
         _inner.SaveWriteOffAsync(transactionHash, reason, writtenOffAt, cancellationToken);
 
@@ -61,10 +61,17 @@ public sealed class FlakyQuoteStore : IQuoteStore
     public Task<int> CountFailedValuationsAsync(CancellationToken cancellationToken) =>
         _inner.CountFailedValuationsAsync(cancellationToken);
 
+    public Task<IReadOnlyList<PaymentValuation>> GetUnresolvedValuationsAsync(
+        DateTimeOffset olderThan, int limit, int offset, CancellationToken cancellationToken) =>
+        _inner.GetUnresolvedValuationsAsync(olderThan, limit, offset, cancellationToken);
+
+    public Task<int> CountUnresolvedValuationsAsync(DateTimeOffset olderThan, CancellationToken cancellationToken) =>
+        _inner.CountUnresolvedValuationsAsync(olderThan, cancellationToken);
+
     public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) =>
         _inner.GetUndeliveredValuationsAsync(limit, cancellationToken);
 
-    public Task MarkValuationDeliveredAsync(
+    public Task<bool> MarkValuationDeliveredAsync(
         string transactionHash, ValuationState deliveredState, CancellationToken cancellationToken) =>
         _inner.MarkValuationDeliveredAsync(transactionHash, deliveredState, cancellationToken);
 

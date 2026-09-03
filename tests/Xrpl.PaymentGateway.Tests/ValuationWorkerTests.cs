@@ -259,6 +259,53 @@ public class ValuationWorkerTests
     }
 
     [Fact]
+    public async Task ValuateWithFreshSnapshotCapturesOnceForEachPendingEntryNotOncePerPass()
+    {
+        // The option documents one round trip per payment. Pricing a whole pending batch off a single
+        // capture — the per-pair refactor's regression — would also have every entry in it record the
+        // same snapshot ledger, so two entries ending up with two different ledgers is what proves each
+        // got its own capture rather than sharing one.
+        int nextLedger = 900;
+        ScriptedQuoteSource source = new ScriptedQuoteSource();
+        source.Behaviour[Xpm.Key] = () =>
+            new StubQuoteSnapshot(price: 0.01m, ledgerIndex: (uint)System.Threading.Interlocked.Increment(ref nextLedger), capturedAt: Now);
+        await using Harness harness = new Harness(
+            configure: options => options.ValuateWithFreshSnapshot = true,
+            source: source);
+        await harness.Enqueuer.EnqueueAsync(Payment(hash: "HASH1"), Ct);
+        await harness.Enqueuer.EnqueueAsync(Payment(hash: "HASH2"), Ct);
+
+        await harness.StartAsync();
+        await TestWait.UntilAsync(() => harness.Handler.Deliveries.Count == 2, "both freshly captured valuations to be delivered");
+
+        Assert.Equal(2, source.CountFor(Xpm.Key));
+        uint[] snapshotLedgers = harness.Handler.Deliveries
+            .Select(d => d.Valuation.SnapshotLedgerIndex!.Value)
+            .ToArray();
+        Assert.Equal(2, snapshotLedgers.Distinct().Count());
+    }
+
+    [Fact]
+    public async Task ValuateWithFreshSnapshotCapturesNothingForAPairWithNoPendingEntries()
+    {
+        // Capturing is worth its cost only when there is something to price. With the queue empty, a pair
+        // sitting idle between payments must not cost a capture on every poll regardless.
+        ScriptedQuoteSource source = new ScriptedQuoteSource();
+        await using Harness harness = new Harness(
+            configure: options =>
+            {
+                options.ValuateWithFreshSnapshot = true;
+                options.ValuationPollInterval = TimeSpan.FromMilliseconds(10);
+            },
+            source: source);
+
+        await harness.StartAsync();
+        await Task.Delay(200, Ct);
+
+        Assert.Empty(source.Captured);
+    }
+
+    [Fact]
     public async Task AHandlerThatThrowsLeavesTheValuationUndeliveredForTheNextPass()
     {
         await using Harness harness = new Harness();
@@ -417,7 +464,7 @@ public class ValuationWorkerTests
             // the resolved content, where the entry is no longer Failed and a second ValueManuallyAsync
             // call would simply throw.
             harness.Handler.BeforeReturning = null;
-            FailedValuationAdmin admin = new FailedValuationAdmin(harness.QuoteStore, new FixedTimeProvider(Now));
+            UnresolvedValuationAdmin admin = new UnresolvedValuationAdmin(harness.QuoteStore, new FixedTimeProvider(Now));
             await admin.ValueManuallyAsync("HASH1", rate: 0.02m, Ct).ConfigureAwait(false);
             resolved.TrySetResult();
         };
@@ -440,7 +487,7 @@ public class ValuationWorkerTests
     [Fact]
     public async Task AManuallyPricedEntryIsDeliveredThroughTheSameNormalDeliveryPassAsAnAutomaticOne()
     {
-        // FailedValuationAdmin never calls IPaymentValuedHandler itself: it leaves the resolved row
+        // UnresolvedValuationAdmin never calls IPaymentValuedHandler itself: it leaves the resolved row
         // undelivered, exactly as ValuationWorker leaves a freshly computed automatic one, so this worker's
         // own delivery pass is what must pick it up — proving the operator path rides the one delivery
         // mechanism rather than a second one built for it.
@@ -449,7 +496,7 @@ public class ValuationWorkerTests
         await harness.Enqueuer.EnqueueAsync(Payment(), Ct);
         await harness.QuoteStore.SaveValuationFailureAsync("HASH1", "no liquidity", Now, Ct);
 
-        FailedValuationAdmin admin = new FailedValuationAdmin(harness.QuoteStore, new FixedTimeProvider(Now));
+        UnresolvedValuationAdmin admin = new UnresolvedValuationAdmin(harness.QuoteStore, new FixedTimeProvider(Now));
         await admin.ValueManuallyAsync("HASH1", rate: 0.02m, Ct);
 
         await harness.StartAsync();

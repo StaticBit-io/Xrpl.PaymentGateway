@@ -39,15 +39,16 @@ public sealed class HangingQuoteStore : IQuoteStore
     public Task<IReadOnlyList<PendingValuationsByPair>> GetPendingValuationBreakdownAsync(CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<PendingValuationsByPair>>(Array.Empty<PendingValuationsByPair>());
 
-    public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task<bool> SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken) =>
+        Task.FromResult(true);
 
     public Task SaveValuationFailureAsync(
         string transactionHash, string reason, DateTimeOffset failedAt, CancellationToken cancellationToken) =>
         Task.CompletedTask;
 
-    public Task SaveWriteOffAsync(
+    public Task<bool> SaveWriteOffAsync(
         string transactionHash, string reason, DateTimeOffset writtenOffAt, CancellationToken cancellationToken) =>
-        Task.CompletedTask;
+        Task.FromResult(true);
 
     public Task<IReadOnlyList<PaymentValuation>> GetFailedValuationsAsync(
         int limit, int offset, CancellationToken cancellationToken) =>
@@ -55,12 +56,19 @@ public sealed class HangingQuoteStore : IQuoteStore
 
     public Task<int> CountFailedValuationsAsync(CancellationToken cancellationToken) => Task.FromResult(0);
 
+    public Task<IReadOnlyList<PaymentValuation>> GetUnresolvedValuationsAsync(
+        DateTimeOffset olderThan, int limit, int offset, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<PaymentValuation>>(Array.Empty<PaymentValuation>());
+
+    public Task<int> CountUnresolvedValuationsAsync(DateTimeOffset olderThan, CancellationToken cancellationToken) =>
+        Task.FromResult(0);
+
     public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<PaymentValuation>>(Array.Empty<PaymentValuation>());
 
-    public Task MarkValuationDeliveredAsync(
+    public Task<bool> MarkValuationDeliveredAsync(
         string transactionHash, ValuationState deliveredState, CancellationToken cancellationToken) =>
-        Task.CompletedTask;
+        Task.FromResult(true);
 
     public Task<PaymentValuation?> GetValuationAsync(string transactionHash, CancellationToken cancellationToken) =>
         Task.FromResult<PaymentValuation?>(null);
