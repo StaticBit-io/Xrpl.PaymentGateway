@@ -2,14 +2,48 @@
 
 const POLL_PAYMENTS_MS = 2000;
 const POLL_HEALTH_MS = 5000;
+const POLL_UNRESOLVED_MS = 4000;
 
 const el = (id) => document.getElementById(id);
 
 /** Transaction hashes the page has already rendered, so a later poll does not repeat them. */
 const shown = new Set();
 
+/** Transaction hashes whose valuation line has already been appended to their payment row. */
+const valuedShown = new Set();
+
 let buyerId = null;
 let paymentsTimer = null;
+
+/**
+ * TimeSpan comes over the wire as .NET's constant format, "[-][d.]hh:mm:ss[.fffffff]". Just enough
+ * parsing to show it as "2m 14s" rather than the raw string.
+ */
+function formatDuration(timeSpan) {
+    if (!timeSpan) {
+        return "";
+    }
+
+    const colonIndex = timeSpan.indexOf(":");
+    const dotIndex = timeSpan.indexOf(".");
+    const hasDays = dotIndex !== -1 && dotIndex < colonIndex;
+
+    const days = hasDays ? parseInt(timeSpan.slice(0, dotIndex), 10) : 0;
+    const rest = hasDays ? timeSpan.slice(dotIndex + 1) : timeSpan;
+    const [hoursPart, minutesPart, secondsPart] = rest.split(":");
+
+    const hours = parseInt(hoursPart, 10) + days * 24;
+    const minutes = parseInt(minutesPart, 10);
+    const seconds = Math.floor(parseFloat(secondsPart));
+
+    if (hours > 0) {
+        return `${hours}h ${minutes}m`;
+    }
+    if (minutes > 0) {
+        return `${minutes}m ${seconds}s`;
+    }
+    return `${seconds}s`;
+}
 
 // ---------------------------------------------------------------------------- monitor strip
 
@@ -76,6 +110,45 @@ el("reconcile").addEventListener("click", async (event) => {
     }
 });
 
+// ---------------------------------------------------------------------------- quote health strip
+
+/**
+ * 404 means no quote pairs are configured — the sample runs exactly as it does without this feature, so
+ * the strip stays hidden rather than reporting on something that does not exist.
+ */
+async function pollQuoteHealth() {
+    try {
+        const response = await fetch("/api/quotes/health");
+        if (response.status === 404) {
+            el("quote-monitor").hidden = true;
+            return;
+        }
+
+        el("quote-monitor").hidden = false;
+        const report = await response.json();
+
+        el("quote-monitor-dot").className = `monitor-dot ${report.isHealthy ? "ok" : "warn"}`;
+
+        const parts = [`${report.pairsWithFreshQuote}/${report.configuredPairs} pairs fresh`];
+        if (report.pairsFailing > 0) {
+            parts.push(`${report.pairsFailing} refresh${report.pairsFailing === 1 ? "" : "es"} failing`);
+        }
+        if (report.pendingValuations > 0) {
+            const oldest = report.oldestPendingAge ? `, oldest waiting ${formatDuration(report.oldestPendingAge)}` : "";
+            parts.push(`${report.pendingValuations} payment${report.pendingValuations === 1 ? "" : "s"} pending valuation${oldest}`);
+        }
+        if (report.failedValuations > 0) {
+            parts.push(`${report.failedValuations} failed, waiting on an operator`);
+        }
+
+        el("quote-monitor-text").textContent = parts.join(" · ");
+    } catch {
+        el("quote-monitor").hidden = false;
+        el("quote-monitor-dot").className = "monitor-dot bad";
+        el("quote-monitor-text").textContent = "the sample API is not answering";
+    }
+}
+
 // ---------------------------------------------------------------------------- checkout
 
 el("checkout-form").addEventListener("submit", async (event) => {
@@ -100,6 +173,7 @@ el("checkout-form").addEventListener("submit", async (event) => {
         const instructions = await response.json();
         buyerId = requested;
         shown.clear();
+        valuedShown.clear();
 
         el("pay-address").textContent = instructions.address;
         el("pay-tag").textContent = instructions.destinationTag;
@@ -114,6 +188,7 @@ el("checkout-form").addEventListener("submit", async (event) => {
         el("waiting").hidden = false;
 
         startPollingPayments();
+        loadPrice(requested);
     } catch (problem) {
         error.textContent = `Could not get instructions: ${problem.message}`;
         error.hidden = false;
@@ -121,6 +196,31 @@ el("checkout-form").addEventListener("submit", async (event) => {
         button.disabled = false;
     }
 });
+
+/**
+ * What this checkout is priced at, before any payment exists — ExactOutput against the demo item's fixed
+ * quote price. Empty when no pair currently holds a usable reading (including every refused pair, which
+ * never captures one), in which case the panel simply stays hidden rather than showing an empty price.
+ */
+async function loadPrice(buyer) {
+    try {
+        const prices = await (await fetch(`/api/checkout/${encodeURIComponent(buyer)}/price`)).json();
+        if (prices.length === 0) {
+            el("pay-price-field").hidden = true;
+            return;
+        }
+
+        const price = prices[0];
+        el("pay-price").textContent =
+            `${price.quotePrice} ${price.quoteCurrency} ≈ ${price.inputAmount} ${price.currency}`;
+        el("pay-price-age").textContent =
+            `priced ${formatDuration(price.age)} ago at ledger ${price.ledgerIndex}`
+            + (price.isStale ? " — past the age limit, served anyway" : "");
+        el("pay-price-field").hidden = false;
+    } catch {
+        el("pay-price-field").hidden = true;
+    }
+}
 
 /**
  * Three calls against the standalone stand's admin port. Deliberately not chained through shell
@@ -202,10 +302,13 @@ async function pollPayments() {
     } catch {
         // The API blinked. The next tick asks again; nothing here is worth interrupting the page for.
     }
+
+    await pollValuations();
 }
 
 function renderPayment(payment) {
     const item = document.createElement("li");
+    item.dataset.hash = payment.transactionHash;
 
     const amount = document.createElement("div");
     amount.className = "paid-amount";
@@ -228,6 +331,188 @@ function renderPayment(payment) {
 
     item.append(amount, meta);
     return item;
+}
+
+/**
+ * A payment's value, fetched separately from the payment itself: it is computed afterwards, sometimes
+ * seconds later, and this poll is what makes that ordering visible on the page rather than hiding it
+ * behind a row that only ever appears once it is already priced.
+ */
+async function pollValuations() {
+    if (buyerId === null) {
+        return;
+    }
+
+    try {
+        const valuations = await (await fetch(`/api/checkout/${encodeURIComponent(buyerId)}/valuations`)).json();
+        for (const valuation of valuations) {
+            if (valuedShown.has(valuation.transactionHash)) {
+                continue;
+            }
+
+            const row = document.querySelector(`#payments li[data-hash="${CSS.escape(valuation.transactionHash)}"]`);
+            if (!row) {
+                // The valuation reached the page before the payment row did — possible on a fresh load
+                // that catches both polls close together. Nothing to attach it to yet; caught next tick.
+                continue;
+            }
+
+            valuedShown.add(valuation.transactionHash);
+            row.appendChild(renderValuation(valuation));
+        }
+    } catch {
+        // Same as pollPayments: the next tick asks again.
+    }
+}
+
+function renderValuation(valuation) {
+    const line = document.createElement("div");
+
+    if (valuation.state === "Valued" || valuation.state === "ValuedManually") {
+        line.className = "valuation valued";
+        const manually = valuation.state === "ValuedManually" ? " — an operator's rate" : "";
+        line.textContent = `worth ${valuation.quoteAmount} (${valuation.pairKey.split("/")[1]})${manually}`;
+    } else if (valuation.state === "WrittenOff") {
+        line.className = "valuation written-off";
+        line.textContent = `written off: ${valuation.writeOffReason ?? "no reason given"}`;
+    } else {
+        // Failed: the automatic pipeline gave up on a per-entry, deterministic cause and an operator has
+        // not resolved it yet.
+        line.className = "valuation failed";
+        line.textContent = `could not be priced: ${valuation.failureReason ?? "unknown reason"}`;
+    }
+
+    return line;
+}
+
+// ---------------------------------------------------------------------------- unresolved payments
+
+/**
+ * The operator's queue. Not scoped to a buyer — an operator works this list independent of who paid —
+ * so it polls on its own timer rather than piggybacking on pollPayments the way pollValuations does.
+ */
+async function pollUnresolved() {
+    try {
+        const response = await fetch("/api/quotes/unresolved");
+        if (response.status === 404) {
+            el("step-unresolved").hidden = true;
+            return;
+        }
+
+        el("step-unresolved").hidden = false;
+        const page = await response.json();
+
+        // Rebuilt by hash rather than wholesale: a blind replaceChildren() every four seconds would wipe
+        // out a rate an operator is mid-typing into a still-unresolved row. An entry present in both the
+        // old and new page keeps its existing DOM — and whatever is currently in its inputs — untouched;
+        // only rows that appeared or disappeared are added or removed.
+        const list = el("unresolved-list");
+        const seen = new Set();
+        for (const entry of page.items) {
+            seen.add(entry.transactionHash);
+            if (!list.querySelector(`li[data-hash="${CSS.escape(entry.transactionHash)}"]`)) {
+                list.appendChild(renderUnresolved(entry));
+            }
+        }
+        for (const row of Array.from(list.children)) {
+            if (!seen.has(row.dataset.hash)) {
+                row.remove();
+            }
+        }
+
+        el("unresolved-empty").hidden = page.items.length !== 0;
+    } catch {
+        // Next tick tries again.
+    }
+}
+
+function renderUnresolved(entry) {
+    const item = document.createElement("li");
+    item.dataset.hash = entry.transactionHash;
+
+    const amount = document.createElement("div");
+    amount.className = "unresolved-amount";
+    amount.textContent = `${entry.amount} (${entry.pairKey.split("/")[0]})`;
+
+    const meta = document.createElement("p");
+    meta.className = "unresolved-meta";
+    const reason = entry.failureReason ?? "queued, no usable reading yet";
+    meta.textContent = `${entry.state} · ${reason} · enqueued ${entry.enqueuedAt} · ${entry.transactionHash}`;
+
+    const actions = document.createElement("div");
+    actions.className = "unresolved-actions";
+
+    const rateInput = document.createElement("input");
+    rateInput.type = "number";
+    rateInput.step = "any";
+    rateInput.min = "0";
+    rateInput.placeholder = "rate";
+
+    const settleButton = document.createElement("button");
+    settleButton.type = "button";
+    settleButton.textContent = "settle";
+
+    const reasonInput = document.createElement("input");
+    reasonInput.type = "text";
+    reasonInput.placeholder = "reason";
+
+    const writeOffButton = document.createElement("button");
+    writeOffButton.type = "button";
+    writeOffButton.className = "secondary";
+    writeOffButton.textContent = "write off";
+
+    const status = document.createElement("span");
+    status.className = "unresolved-status";
+
+    settleButton.addEventListener("click", () => resolveUnresolved(
+        entry.transactionHash, "settle", { rate: parseFloat(rateInput.value) }, settleButton, status,
+        () => parseFloat(rateInput.value) > 0 || "enter a positive rate"));
+
+    writeOffButton.addEventListener("click", () => resolveUnresolved(
+        entry.transactionHash, "write-off", { reason: reasonInput.value.trim() || "no reason given" },
+        writeOffButton, status));
+
+    actions.append(rateInput, settleButton, reasonInput, writeOffButton, status);
+    item.append(amount, meta, actions);
+    return item;
+}
+
+/**
+ * Both operator actions land through IUnresolvedValuationAdmin and, from there, the same
+ * IPaymentValuedHandler an automatic valuation reaches — so a short delay and a re-poll of the buyer's
+ * valuations is enough to see the resolution arrive the same way a priced payment does.
+ */
+async function resolveUnresolved(transactionHash, action, body, button, status, validate) {
+    if (validate) {
+        const validation = validate();
+        if (validation !== true) {
+            status.textContent = validation;
+            return;
+        }
+    }
+
+    button.disabled = true;
+    status.textContent = "";
+
+    try {
+        const response = await fetch(`/api/quotes/unresolved/${encodeURIComponent(transactionHash)}/${action}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+
+        if (response.ok) {
+            window.setTimeout(pollUnresolved, 500);
+            window.setTimeout(pollValuations, 750);
+        } else {
+            const problem = await response.json().catch(() => null);
+            status.textContent = problem?.message ?? `request failed (${response.status})`;
+        }
+    } catch {
+        status.textContent = "request failed";
+    } finally {
+        button.disabled = false;
+    }
 }
 
 // ---------------------------------------------------------------------------- copy buttons
@@ -258,3 +543,7 @@ document.addEventListener("click", async (event) => {
 el("buyer").value = `buyer-${Math.floor(Math.random() * 9000 + 1000)}`;
 pollHealth();
 window.setInterval(pollHealth, POLL_HEALTH_MS);
+pollQuoteHealth();
+window.setInterval(pollQuoteHealth, POLL_HEALTH_MS);
+pollUnresolved();
+window.setInterval(pollUnresolved, POLL_UNRESOLVED_MS);

@@ -47,7 +47,49 @@ builder.Services.AddXrplPaymentGateway(options =>
     options.FirstDestinationTag = firstTag;
 });
 
+// Quotes are optional in the library, and stay optional here: with no pairs configured (the shipped
+// default), AddXrplPaymentQuotes is never called, so a host that ignores this section gets exactly what
+// it got before 1.1.0 — no new background service, no new network traffic.
+QuoteConfiguration quoteConfiguration = QuoteConfiguration.FromConfiguration(builder.Configuration);
+
+if (quoteConfiguration.IsEnabled)
+{
+    // The quote store follows the same in-memory/file switch as the payment store, so the two halves of
+    // the gateway's state can never end up split across different backends. FileQuoteStore deliberately
+    // keeps its own file rather than sharing the payment store's — see its remarks — hence the suffix.
+    if (string.IsNullOrWhiteSpace(storePath))
+    {
+        builder.Services.AddSingleton<IQuoteStore, InMemoryQuoteStore>();
+    }
+    else
+    {
+        builder.Services.AddSingleton<IQuoteStore>(_ => new FileQuoteStore(storePath + ".quotes.json"));
+    }
+
+    // A deliberate stand-in, not a pricing engine: see FixedRateQuoteSource's own remarks for what a real
+    // IQuoteSource would do instead.
+    builder.Services.AddSingleton<IQuoteSource>(_ => new FixedRateQuoteSource(
+        quoteConfiguration.RatesByPairKey, quoteConfiguration.RefusedCurrencies));
+
+    builder.Services.AddSingleton<SampleValuedHandler>();
+    builder.Services.AddSingleton<IPaymentValuedHandler>(services => services.GetRequiredService<SampleValuedHandler>());
+
+    builder.Services.AddXrplPaymentQuotes(options => options.Pairs = quoteConfiguration.Pairs);
+}
+
 WebApplication app = builder.Build();
+
+// Resolved once at startup rather than injected per request: with no pairs configured these are simply
+// null, and every quote endpoint below treats that as "this section has nothing to show" instead of
+// failing to bind a service nothing registered.
+IQuoteReader? quoteReader = app.Services.GetService<IQuoteReader>();
+IQuoteHealth? quoteHealth = app.Services.GetService<IQuoteHealth>();
+IUnresolvedValuationAdmin? unresolvedValuationAdmin = app.Services.GetService<IUnresolvedValuationAdmin>();
+SampleValuedHandler? valuedHandler = app.Services.GetService<SampleValuedHandler>();
+
+// What the sample's one fictional item costs, in the quote asset. A real host reads this from its own
+// catalog; a demo just needs one fixed number to ask ExactOutput about.
+const decimal DemoItemQuotePrice = 25m;
 
 // The checkout page. Plain files, no build step: `dotnet run` is the whole toolchain.
 app.UseDefaultFiles();
@@ -109,4 +151,134 @@ app.MapGet("/api/health", async (IPaymentMonitorHealth health, CancellationToken
 app.MapPost("/api/reconcile", async (IPaymentMonitorHealth health, CancellationToken cancellationToken) =>
     Results.Ok(await health.ReconcileAsync(cancellationToken)));
 
+// What the buyer is being asked for, before any money moves: ExactOutput against the fictional item's
+// price, one entry per pair that currently holds a usable reading. A refused pair never captures a
+// snapshot, so it never appears here — the same reason it never appears priced anywhere else. Empty when
+// quotes are not configured at all, which is what lets the page hide the section rather than show nothing.
+app.MapGet("/api/checkout/{buyerId}/price", async (string buyerId, CancellationToken cancellationToken) =>
+{
+    if (quoteReader is null)
+    {
+        return Results.Ok(Array.Empty<object>());
+    }
+
+    List<object> prices = new List<object>();
+    foreach (QuotePair pair in quoteConfiguration.Pairs)
+    {
+        QuoteView? view = await quoteReader.QuoteAsync(
+            pair.Currency, pair.Issuer, DemoItemQuotePrice, QuoteDirection.ExactOutput, cancellationToken);
+
+        if (view is null)
+        {
+            continue;
+        }
+
+        prices.Add(new
+        {
+            pair.Currency,
+            pair.Issuer,
+            pair.QuoteCurrency,
+            pair.QuoteIssuer,
+            QuotePrice = DemoItemQuotePrice,
+            InputAmount = view.Result?.InputAmount,
+            view.CapturedAt,
+            view.Age,
+            view.LedgerIndex,
+            view.IsStale,
+        });
+    }
+
+    return Results.Ok(prices);
+});
+
+// What this buyer's payments turned out to be worth. Deliberately a separate poll from
+// /api/checkout/{buyerId}/payments rather than one merged row: a payment is announced the moment it
+// arrives, and its valuation is a second, later signal — collapsing them into one row that shows up
+// already priced would hide the ordering the whole feature rests on.
+app.MapGet("/api/checkout/{buyerId}/valuations", (string buyerId) => Results.Ok(
+    valuedHandler?.Valued.Where(v => v.BuyerId == buyerId) ?? Enumerable.Empty<ValuedPayment>()));
+
+app.MapGet("/api/valuations", () =>
+    Results.Ok(valuedHandler?.Valued ?? (IReadOnlyCollection<ValuedPayment>)Array.Empty<ValuedPayment>()));
+
+app.MapGet("/api/quotes/health", async (CancellationToken cancellationToken) =>
+{
+    if (quoteHealth is null)
+    {
+        return Results.NotFound(new { message = "no quote pairs are configured" });
+    }
+
+    QuoteHealthReport report = await quoteHealth.CheckAsync(cancellationToken);
+    return report.IsHealthy ? Results.Ok(report) : Results.Json(report, statusCode: 503);
+});
+
+// The operator's queue: payments the automatic pipeline has not resolved, oldest first. minAge is zero
+// rather than the library's own 15-minute default — a demo should show a stuck entry the moment it exists,
+// not a quarter of an hour later.
+app.MapGet("/api/quotes/unresolved", async (int? limit, int? offset, CancellationToken cancellationToken) =>
+{
+    if (unresolvedValuationAdmin is null)
+    {
+        return Results.NotFound(new { message = "no quote pairs are configured" });
+    }
+
+    UnresolvedValuationPage page = await unresolvedValuationAdmin
+        .ListUnresolvedAsync(limit ?? 50, offset ?? 0, TimeSpan.Zero, cancellationToken)
+        .ConfigureAwait(false);
+
+    return Results.Ok(page);
+});
+
+// An operator found a real price some other way. Runs through IUnresolvedValuationAdmin, which leaves the
+// entry undelivered exactly as an automatic valuation does — the same ValuationWorker pass that already
+// retries a stuck delivery is what hands this to SampleValuedHandler, within one poll.
+app.MapPost("/api/quotes/unresolved/{transactionHash}/settle", async (
+    string transactionHash, SettleRequest request, CancellationToken cancellationToken) =>
+{
+    if (unresolvedValuationAdmin is null)
+    {
+        return Results.NotFound(new { message = "no quote pairs are configured" });
+    }
+
+    try
+    {
+        await unresolvedValuationAdmin.ValueManuallyAsync(transactionHash, request.Rate, cancellationToken);
+        return Results.Ok();
+    }
+    catch (ArgumentOutOfRangeException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+    catch (InvalidOperationException ex)
+    {
+        // Not currently Pending or Failed — an operator (maybe this same one, twice) already resolved it.
+        return Results.Conflict(new { message = ex.Message });
+    }
+});
+
+// An operator decided this one will never be credited — dust, a spam token, a mistaken transfer.
+app.MapPost("/api/quotes/unresolved/{transactionHash}/write-off", async (
+    string transactionHash, WriteOffRequest request, CancellationToken cancellationToken) =>
+{
+    if (unresolvedValuationAdmin is null)
+    {
+        return Results.NotFound(new { message = "no quote pairs are configured" });
+    }
+
+    try
+    {
+        await unresolvedValuationAdmin.WriteOffAsync(transactionHash, request.Reason, cancellationToken);
+        return Results.Ok();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Conflict(new { message = ex.Message });
+    }
+});
+
 app.Run();
+
+// What the unresolved operator endpoints above bind their request bodies to.
+internal sealed record SettleRequest(decimal Rate);
+
+internal sealed record WriteOffRequest(string Reason);

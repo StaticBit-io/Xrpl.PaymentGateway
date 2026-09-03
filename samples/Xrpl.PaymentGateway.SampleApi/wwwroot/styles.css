@@ -314,3 +314,82 @@ code.inline {
     padding: .1rem .3rem;
     font-size: .8rem;
 }
+
+/* The checkout price panel: what the buyer is being asked for, before any payment exists. */
+.price {
+    margin: 0;
+    font-size: 1.3rem;
+    font-weight: 700;
+}
+
+/* A valuation appended to a payment row after the fact — a second signal, visibly later than the row
+   itself rather than folded into it from the start. */
+.valuation {
+    margin: .55rem 0 0;
+    padding-top: .55rem;
+    border-top: 1px dashed var(--border);
+    font-size: .85rem;
+    color: var(--muted);
+}
+
+.valuation.valued { color: var(--ok); }
+.valuation.failed,
+.valuation.written-off { color: var(--warn); }
+
+.unresolved {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.unresolved li {
+    border: 1px solid var(--warn);
+    border-radius: .5rem;
+    padding: .9rem 1rem;
+    margin-top: .8rem;
+}
+
+.unresolved-amount {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--warn);
+}
+
+.unresolved-meta {
+    margin: .35rem 0 0;
+    font-size: .8rem;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+}
+
+.unresolved-actions {
+    display: flex;
+    gap: .5rem;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: .7rem;
+}
+
+.unresolved-actions input[type="text"],
+.unresolved-actions input[type="number"] {
+    padding: .4rem .55rem;
+    font: inherit;
+    font-size: .85rem;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: .4rem;
+    width: 9rem;
+}
+
+.unresolved-actions button.secondary {
+    background: transparent;
+    color: var(--text);
+    border-color: var(--border);
+}
+
+.unresolved-status {
+    margin-left: .3rem;
+    font-size: .8rem;
+    color: var(--muted);
+}
