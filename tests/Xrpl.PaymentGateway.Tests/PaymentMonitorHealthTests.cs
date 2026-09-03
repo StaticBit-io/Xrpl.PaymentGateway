@@ -345,11 +345,23 @@ public sealed class CountingQuoteStore : IQuoteStore
     public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken) =>
         _inner.GetPendingValuationsAsync(limit, cancellationToken);
 
-    public Task MarkValuationAttemptedAsync(string transactionHash, DateTimeOffset attemptedAt, CancellationToken cancellationToken) =>
-        _inner.MarkValuationAttemptedAsync(transactionHash, attemptedAt, cancellationToken);
-
     public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken) =>
         _inner.SaveValuationAsync(valuation, cancellationToken);
+
+    public Task SaveValuationFailureAsync(
+        string transactionHash, string reason, DateTimeOffset failedAt, CancellationToken cancellationToken) =>
+        _inner.SaveValuationFailureAsync(transactionHash, reason, failedAt, cancellationToken);
+
+    public Task SaveWriteOffAsync(
+        string transactionHash, string reason, DateTimeOffset writtenOffAt, CancellationToken cancellationToken) =>
+        _inner.SaveWriteOffAsync(transactionHash, reason, writtenOffAt, cancellationToken);
+
+    public Task<IReadOnlyList<PaymentValuation>> GetFailedValuationsAsync(
+        int limit, int offset, CancellationToken cancellationToken) =>
+        _inner.GetFailedValuationsAsync(limit, offset, cancellationToken);
+
+    public Task<int> CountFailedValuationsAsync(CancellationToken cancellationToken) =>
+        _inner.CountFailedValuationsAsync(cancellationToken);
 
     public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) =>
         _inner.GetUndeliveredValuationsAsync(limit, cancellationToken);

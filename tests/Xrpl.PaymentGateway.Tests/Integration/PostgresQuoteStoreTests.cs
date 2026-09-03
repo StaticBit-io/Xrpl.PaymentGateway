@@ -47,15 +47,17 @@ public class PostgresQuoteStoreTests : QuoteStoreContract, IAsyncDisposable
     }
 
     [Fact]
-    public async Task EnsureSchemaAsyncAddsAMissingColumnToAValuationsTableThatPredatesIt()
+    public async Task EnsureSchemaAsyncAddsMissingColumnsToAValuationsTableThatPredatesTheStateColumn()
     {
-        // last_attempt_at was added to the valuations table's CREATE TABLE IF NOT EXISTS body only. On a
-        // database where the table already existed before that column shipped, CREATE TABLE IF NOT EXISTS
-        // is a no-op, and EnsureSchemaAsync used to report success while every later valuation query
-        // failed with "column last_attempt_at does not exist". Every other test in this class builds its
-        // schema from EnsureSchemaAsync itself, so the table always already has the column — this is the
-        // only shape of test that would have caught the gap: build the pre-existing table by hand, without
-        // the column, then run EnsureSchemaAsync and prove the queue actually works afterwards.
+        // "state" and the failure/write-off columns beside it were added to the valuations table's
+        // CREATE TABLE IF NOT EXISTS body only. On a database where the table already existed before that
+        // shipped — every earlier gateway version wrote a table shaped like this one — CREATE TABLE IF NOT
+        // EXISTS is a no-op, and EnsureSchemaAsync would report success while every later valuation query
+        // failed with "column state does not exist". Every other test in this class builds its schema from
+        // EnsureSchemaAsync itself, so the table always already has the columns — this is the only shape of
+        // test that would have caught the gap: build the pre-existing table by hand, without them, seed it
+        // with rows the way a real database would already hold, run EnsureSchemaAsync, and prove both the
+        // backfill and the new queue methods work afterwards.
         await SkipUnlessDatabaseIsReachableAsync();
 
         await using (NpgsqlConnection connection = new NpgsqlConnection(ConnectionString))
@@ -72,6 +74,7 @@ public class PostgresQuoteStoreTests : QuoteStoreContract, IAsyncDisposable
                     payment_ledger_index  BIGINT      NOT NULL,
                     destination_tag       BIGINT      NULL,
                     enqueued_at           TIMESTAMPTZ NOT NULL,
+                    last_attempt_at       TIMESTAMPTZ NULL,
                     valued_at             TIMESTAMPTZ NULL,
                     quote_amount          NUMERIC     NULL,
                     effective_price       NUMERIC     NULL,
@@ -84,6 +87,16 @@ public class PostgresQuoteStoreTests : QuoteStoreContract, IAsyncDisposable
                     snapshot_captured_at  TIMESTAMPTZ NULL,
                     delivered             BOOLEAN     NOT NULL DEFAULT FALSE
                 );
+                -- Seeded directly, the way a real pre-migration database already holds rows: one already
+                -- valued, one still pending. The backfill must tell them apart correctly.
+                INSERT INTO "{_schema}".valuations
+                    (transaction_hash, pair_key, amount, payment_ledger_index, enqueued_at, valued_at, quote_amount, delivered)
+                VALUES
+                    ('PRE-EXISTING-VALUED', 'PAIR', 10, 1, now(), now(), 1.5, TRUE);
+                INSERT INTO "{_schema}".valuations
+                    (transaction_hash, pair_key, amount, payment_ledger_index, enqueued_at)
+                VALUES
+                    ('PRE-EXISTING-PENDING', 'PAIR', 20, 2, now());
                 """,
                 connection);
             await create.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
@@ -94,24 +107,45 @@ public class PostgresQuoteStoreTests : QuoteStoreContract, IAsyncDisposable
         PostgresQuoteStore store = new PostgresQuoteStore(ConnectionString, _schema);
         await store.EnsureSchemaAsync(TestContext.Current.CancellationToken);
 
-        PaymentValuation pending = new PaymentValuation
+        // The backfill: a row that already had valued_at must read back Valued, not the column's own
+        // default of Pending; a row that never had one must stay Pending.
+        PaymentValuation? valued = await store.GetValuationAsync(
+            "PRE-EXISTING-VALUED", TestContext.Current.CancellationToken);
+        Assert.NotNull(valued);
+        Assert.Equal(ValuationState.Valued, valued!.State);
+        Assert.Equal(1.5m, valued.QuoteAmount);
+
+        PaymentValuation? stillPending = await store.GetValuationAsync(
+            "PRE-EXISTING-PENDING", TestContext.Current.CancellationToken);
+        Assert.NotNull(stillPending);
+        Assert.Equal(ValuationState.Pending, stillPending!.State);
+        Assert.Contains(
+            await store.GetPendingValuationsAsync(10, TestContext.Current.CancellationToken),
+            v => v.TransactionHash == "PRE-EXISTING-PENDING");
+
+        // The new queue methods, exercised end to end on the migrated table.
+        PaymentValuation freshlyQueued = new PaymentValuation
         {
             TransactionHash = "PRE-EXISTING-SCHEMA",
             PairKey = "PAIR",
             Amount = 10m,
-            PaymentLedgerIndex = 1,
+            PaymentLedgerIndex = 3,
             EnqueuedAt = DateTimeOffset.UtcNow,
         };
-        Assert.True(await store.TryEnqueueValuationAsync(pending, TestContext.Current.CancellationToken));
-        Assert.Single(await store.GetPendingValuationsAsync(10, TestContext.Current.CancellationToken));
+        Assert.True(await store.TryEnqueueValuationAsync(freshlyQueued, TestContext.Current.CancellationToken));
 
-        await store.MarkValuationAttemptedAsync(
-            "PRE-EXISTING-SCHEMA", DateTimeOffset.UtcNow, TestContext.Current.CancellationToken);
+        await store.SaveValuationFailureAsync(
+            "PRE-EXISTING-SCHEMA", "no liquidity", DateTimeOffset.UtcNow, TestContext.Current.CancellationToken);
+        Assert.Equal(1, await store.CountFailedValuationsAsync(TestContext.Current.CancellationToken));
+
+        await store.SaveWriteOffAsync(
+            "PRE-EXISTING-SCHEMA", "dust", DateTimeOffset.UtcNow, TestContext.Current.CancellationToken);
 
         PaymentValuation? read = await store.GetValuationAsync(
             "PRE-EXISTING-SCHEMA", TestContext.Current.CancellationToken);
         Assert.NotNull(read);
-        Assert.NotNull(read!.LastAttemptAt);
+        Assert.Equal(ValuationState.WrittenOff, read!.State);
+        Assert.Equal("dust", read.WriteOffReason);
     }
 
     [Fact]
