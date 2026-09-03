@@ -383,7 +383,7 @@ function renderValuation(valuation) {
     if (valuation.state === "Valued" || valuation.state === "ValuedManually") {
         line.className = "valuation valued";
         const manually = valuation.state === "ValuedManually" ? " — an operator's rate" : "";
-        line.textContent = `worth ${valuation.quoteAmount} (${valuation.pairKey.split("/")[1]})${manually}`;
+        line.textContent = `worth ${valuation.quoteAmount} ${valuation.readableQuoteCurrency ?? "?"}${manually}`;
     } else if (valuation.state === "WrittenOff") {
         line.className = "valuation written-off";
         line.textContent = `written off: ${valuation.writeOffReason ?? "no reason given"}`;
@@ -444,7 +444,7 @@ function renderUnresolved(entry) {
 
     const amount = document.createElement("div");
     amount.className = "unresolved-amount";
-    amount.textContent = `${entry.amount} (${entry.pairKey.split("/")[0]})`;
+    amount.textContent = `${entry.amount} ${entry.readableCurrency ?? "?"}`;
 
     const meta = document.createElement("p");
     meta.className = "unresolved-meta";
