@@ -196,6 +196,11 @@ code.tag {
 
 code.uri { font-size: .78rem; }
 
+/* The attribute means hidden, whatever else an element's own rule says. Without this, any element whose
+   class sets `display` — `.waiting` is the one that bit — stays on screen after the page sets `hidden`,
+   because the user-agent rule for [hidden] loses to a class selector on specificity. */
+[hidden] { display: none !important; }
+
 .hint {
     margin: .5rem 0 0;
     font-size: .82rem;
@@ -323,6 +328,69 @@ code.inline {
     margin: 0;
     font-size: 1.3rem;
     font-weight: 700;
+}
+
+/* One line per pair that can price this checkout. The list only ever holds a handful of entries, so it
+   reads as a short menu of ways to pay rather than as a table. */
+.prices {
+    list-style: none;
+    margin: .5rem 0 0;
+    padding: 0;
+}
+
+.prices li {
+    display: flex;
+    align-items: baseline;
+    gap: .6rem;
+    flex-wrap: wrap;
+    padding: .3rem 0;
+}
+
+.prices .hint { margin: 0; }
+
+.price-amount {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+/* The demo wallet's buttons: one row per asset, each an amount and a send. */
+.demo-assets {
+    list-style: none;
+    margin: .6rem 0 0;
+    padding: 0;
+}
+
+.demo-asset {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    flex-wrap: wrap;
+    margin-top: .5rem;
+}
+
+/* The bare `code` rule below stretches to fill a row; an asset label is a label, so it takes only the
+   width its code needs. */
+.demo-asset-code {
+    flex: 0 0 auto;
+    min-width: 3.5rem;
+    text-align: center;
+    font-weight: 600;
+}
+
+.demo-asset input[type="number"] {
+    padding: .4rem .55rem;
+    font: inherit;
+    font-size: .85rem;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: .4rem;
+    width: 9rem;
+}
+
+.demo-asset-status {
+    font-size: .82rem;
+    color: var(--muted);
 }
 
 /* A valuation appended to a payment row after the fact — a second signal, visibly later than the row

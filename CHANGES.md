@@ -34,6 +34,9 @@ nothing else gets no new background service and no new network traffic.
   payments and never blocks a healthy pair's.
 - `IQuoteHealth` reports pair freshness, failure streaks, the true pending count and the age of
   the oldest waiting payment — not a page-capped approximation of them.
+- The sample can pay itself: set `Xrpl:Demo:PayerSeed` and the checkout page grows a send button per
+  accepted asset, so a full demonstration needs one terminal rather than two. Test networks only — a seed
+  in configuration is a private key in a text file.
 
 Nothing in the 1.0.0 surface changed.
 

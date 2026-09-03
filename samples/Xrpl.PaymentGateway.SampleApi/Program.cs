@@ -43,15 +43,23 @@ builder.Services.AddSingleton(quoteConfiguration);
 builder.Services.AddSingleton<SamplePaymentHandler>();
 builder.Services.AddSingleton<IPaymentReceivedHandler>(services => services.GetRequiredService<SamplePaymentHandler>());
 
+string[] nodes = builder.Configuration.GetSection("Xrpl:Nodes").Get<string[]>() ?? ["ws://localhost:6006"];
+
 builder.Services.AddXrplPaymentGateway(options =>
 {
     options.Address = builder.Configuration["Xrpl:Address"]
         ?? throw new InvalidOperationException("configure Xrpl:Address with the receiving r-address");
-    options.Nodes = (builder.Configuration.GetSection("Xrpl:Nodes").Get<string[]>() ?? ["ws://localhost:6006"])
-        .Select(node => new Uri(node))
-        .ToArray();
+    options.Nodes = nodes.Select(node => new Uri(node)).ToArray();
     options.FirstDestinationTag = firstTag;
 });
+
+// A wallet the sample can pay itself from, so the demonstration does not need a second terminal. Registered
+// only when a seed is configured; without one the endpoints below answer 404 and the page hides the buttons.
+if (DemoPayer.IsConfigured(builder.Configuration))
+{
+    builder.Services.AddSingleton(services => DemoPayer.Create(
+        builder.Configuration, nodes[0], services.GetRequiredService<ILogger<DemoPayer>>()));
+}
 
 // Quotes are optional in the library, and stay optional here: with no pairs configured (the shipped
 // default), AddXrplPaymentQuotes is never called, so a host that ignores this section gets exactly what
@@ -90,6 +98,18 @@ IQuoteReader? quoteReader = app.Services.GetService<IQuoteReader>();
 IQuoteHealth? quoteHealth = app.Services.GetService<IQuoteHealth>();
 IUnresolvedValuationAdmin? unresolvedValuationAdmin = app.Services.GetService<IUnresolvedValuationAdmin>();
 SampleValuedHandler? valuedHandler = app.Services.GetService<SampleValuedHandler>();
+DemoPayer? demoPayer = app.Services.GetService<DemoPayer>();
+
+// What the demo payer is allowed to send. With quotes configured it is exactly what the sample can name —
+// every priced asset plus the one they are priced into. With quotes off there is no such list, and XRP is
+// the only asset the sample can describe without one.
+IReadOnlyList<AcceptedAsset> demoAssets = quoteConfiguration.IsEnabled
+    ? quoteConfiguration.AcceptedAssets
+    : [new AcceptedAsset("XRP", null, false)];
+
+// A ceiling on one demo payment. The payer holds nothing but stand money, so this guards against a
+// mistyped amount emptying it mid-demonstration, not against loss.
+const decimal MaxDemoPayment = 1_000_000m;
 
 // Maps from pair key to readable currency codes. Pairs are configured at startup, so these
 // mappings are stable for the lifetime of the application.
@@ -393,6 +413,67 @@ app.MapPost("/api/quotes/unresolved/{transactionHash}/write-off", async (
     }
 });
 
+// What the page needs to draw the pay buttons: who is paying, and which assets it may be asked for. 404
+// when no seed is configured, which is what hides that whole block rather than showing dead buttons.
+app.MapGet("/api/demo", () => demoPayer is null
+    ? Results.NotFound(new { message = "the demo payer is not configured" })
+    : Results.Ok(new { Payer = demoPayer.Address, Assets = demoAssets }));
+
+// Pays this checkout from the demo wallet. The destination is not a parameter: it is the address and tag
+// the gateway itself issues for this buyer, fetched here the same way the page fetched them, so the button
+// cannot pay anywhere else. The response is the node's provisional verdict — the payment reaches the page
+// through the gateway's monitor, like any other.
+app.MapPost("/api/checkout/{buyerId}/pay", async (
+    string buyerId,
+    DemoPaymentRequest request,
+    IPaymentGateway gateway,
+    CancellationToken cancellationToken) =>
+{
+    if (demoPayer is null)
+    {
+        return Results.NotFound(new { message = "the demo payer is not configured" });
+    }
+
+    if (request.Amount <= 0m || request.Amount > MaxDemoPayment)
+    {
+        return Results.BadRequest(new { message = $"amount must be above zero and at most {MaxDemoPayment}" });
+    }
+
+    AcceptedAsset? asset = FindAcceptedAsset(demoAssets, request.Currency, request.Issuer);
+    if (asset is null)
+    {
+        return Results.BadRequest(new { message = $"{request.Currency} is not an asset this sample accepts" });
+    }
+
+    PaymentInstructions instructions = await gateway.GetPaymentInstructionsAsync(buyerId, cancellationToken);
+    decimal amount = AssetPrecision.RoundNearestForSending(request.Amount, asset.Currency);
+
+    try
+    {
+        DemoPaymentResult result = await demoPayer.PayAsync(
+            instructions.Address, instructions.DestinationTag, asset.Currency, asset.Issuer, amount, cancellationToken);
+
+        object body = new
+        {
+            result.EngineResult,
+            result.TransactionHash,
+            Amount = amount,
+            asset.Currency,
+            instructions.DestinationTag,
+        };
+
+        // Anything but tesSUCCESS is the node refusing the payment — a missing trust line, an unfunded
+        // payer. Reported as a failure rather than dressed up as an accepted one.
+        return result.EngineResult == "tesSUCCESS" ? Results.Ok(body) : Results.Json(body, statusCode: 502);
+    }
+    catch (Exception problem)
+    {
+        // The node was unreachable, or refused the submission outright. A demo button should say so on the
+        // page rather than leave the browser waiting on a request that already failed.
+        return Results.Json(new { message = problem.Message }, statusCode: 502);
+    }
+});
+
 app.Run();
 
 // Both helpers below back a report, not an ask — a valuation and the unresolved queue describe money that
@@ -409,7 +490,33 @@ decimal? RoundQuoteAmountForReport(decimal? quoteAmount, string? quoteCurrency) 
 decimal RoundReceivedAmountForReport(decimal amount, string? currency) =>
     AssetPrecision.RoundNearestForReport(amount, currency ?? string.Empty);
 
+// Currency codes are compared the way the library compares them — canonically, so "USD" and its 40-character
+// hex form are one asset — and the issuer exactly, because two issuers of the same code are two assets.
+static AcceptedAsset? FindAcceptedAsset(IReadOnlyList<AcceptedAsset> assets, string currency, string? issuer)
+{
+    string canonical;
+    try
+    {
+        canonical = CurrencyKey.Canonical(currency);
+    }
+    catch (ArgumentException)
+    {
+        // Not a currency code at all. No asset can match it.
+        return null;
+    }
+
+    string? normalizedIssuer = string.IsNullOrWhiteSpace(issuer) ? null : issuer;
+
+    return assets.FirstOrDefault(asset =>
+        string.Equals(CurrencyKey.Canonical(asset.Currency), canonical, StringComparison.Ordinal)
+        && string.Equals(asset.Issuer, normalizedIssuer, StringComparison.Ordinal));
+}
+
 // What the unresolved operator endpoints above bind their request bodies to.
 internal sealed record SettleRequest(decimal Rate);
+
+// What the demo payer's endpoint binds to. Amount is what the page put in the box, before this sample rounds
+// it to something the asset can actually express.
+internal sealed record DemoPaymentRequest(string Currency, string? Issuer, decimal Amount);
 
 internal sealed record WriteOffRequest(string Reason);
