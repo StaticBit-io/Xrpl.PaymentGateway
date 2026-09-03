@@ -33,16 +33,15 @@ public sealed class DemoPayer : IDisposable
     private readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
 
     private readonly XrplWallet _wallet;
-    private readonly string _node;
+    private readonly NodeConnection _connection;
     private readonly ILogger<DemoPayer> _logger;
 
-    private XrplClient? _client;
     private bool _disposed;
 
-    private DemoPayer(XrplWallet wallet, string node, ILogger<DemoPayer> logger)
+    private DemoPayer(XrplWallet wallet, NodeConnection connection, ILogger<DemoPayer> logger)
     {
         _wallet = wallet;
-        _node = node;
+        _connection = connection;
         _logger = logger;
     }
 
@@ -57,7 +56,8 @@ public sealed class DemoPayer : IDisposable
         !string.IsNullOrWhiteSpace(configuration["Xrpl:Demo:PayerSeed"]);
 
     /// <summary>Builds a payer from <c>Xrpl:Demo:PayerSeed</c>.</summary>
-    public static DemoPayer Create(IConfiguration configuration, string node, ILogger<DemoPayer> logger)
+    public static DemoPayer Create(
+        IConfiguration configuration, NodeConnection connection, ILogger<DemoPayer> logger)
     {
         string seed = configuration["Xrpl:Demo:PayerSeed"]
             ?? throw new InvalidOperationException("Xrpl:Demo:PayerSeed is not configured");
@@ -67,7 +67,7 @@ public sealed class DemoPayer : IDisposable
             "the demo payer is enabled and will sign payments from {Address} — for a test network only",
             wallet.ClassicAddress);
 
-        return new DemoPayer(wallet, node, logger);
+        return new DemoPayer(wallet, connection, logger);
     }
 
     /// <summary>Submits one payment and reports what the node made of it.</summary>
@@ -104,7 +104,7 @@ public sealed class DemoPayer : IDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            XrplClient client = await ConnectedClientAsync(cancellationToken).ConfigureAwait(false);
+            XrplClient client = await _connection.ClientAsync(cancellationToken).ConfigureAwait(false);
             Submit response = await client.Submit(payment, _wallet, true, false, cancellationToken).ConfigureAwait(false);
 
             _logger.LogInformation(
@@ -121,26 +121,6 @@ public sealed class DemoPayer : IDisposable
         }
     }
 
-    /// <summary>
-    /// The sample's own connection, separate from the gateway's: the gateway owns its node connection and
-    /// its reconnection policy, and borrowing them for a demo button would be reaching into it.
-    /// </summary>
-    private async Task<XrplClient> ConnectedClientAsync(CancellationToken cancellationToken)
-    {
-        if (_client is not null && _client.IsConnected())
-        {
-            return _client;
-        }
-
-        _client?.Dispose();
-        _client = null;
-
-        XrplClient client = new XrplClient(_node);
-        await client.Connect(cancellationToken).ConfigureAwait(false);
-        _client = client;
-        return client;
-    }
-
     public void Dispose()
     {
         if (_disposed)
@@ -149,7 +129,9 @@ public sealed class DemoPayer : IDisposable
         }
 
         _disposed = true;
-        _client?.Dispose();
+
+        // The connection is not this type's to close: it is a shared singleton, and the quote source may
+        // still be reading through it.
         _gate.Dispose();
     }
 }

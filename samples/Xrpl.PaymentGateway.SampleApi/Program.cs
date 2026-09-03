@@ -53,12 +53,18 @@ builder.Services.AddXrplPaymentGateway(options =>
     options.FirstDestinationTag = firstTag;
 });
 
+// One connection to the node for everything in this sample that needs to talk to one — the demo payer and,
+// when configured, the AMM quote source. Not the gateway's connection: that one belongs to the gateway.
+builder.Services.AddSingleton(_ => new NodeConnection(nodes[0]));
+
 // A wallet the sample can pay itself from, so the demonstration does not need a second terminal. Registered
 // only when a seed is configured; without one the endpoints below answer 404 and the page hides the buttons.
 if (DemoPayer.IsConfigured(builder.Configuration))
 {
     builder.Services.AddSingleton(services => DemoPayer.Create(
-        builder.Configuration, nodes[0], services.GetRequiredService<ILogger<DemoPayer>>()));
+        builder.Configuration,
+        services.GetRequiredService<NodeConnection>(),
+        services.GetRequiredService<ILogger<DemoPayer>>()));
 }
 
 // Quotes are optional in the library, and stay optional here: with no pairs configured (the shipped
@@ -78,10 +84,21 @@ if (quoteConfiguration.IsEnabled)
         builder.Services.AddSingleton<IQuoteStore>(_ => new FileQuoteStore(storePath + ".quotes.json"));
     }
 
-    // A deliberate stand-in, not a pricing engine: see FixedRateQuoteSource's own remarks for what a real
-    // IQuoteSource would do instead.
-    builder.Services.AddSingleton<IQuoteSource>(_ => new FixedRateQuoteSource(
-        quoteConfiguration.RatesByPairKey, quoteConfiguration.RefusedCurrencies));
+    // Where prices come from. "amm" reads them off the ledger; anything else, including the shipped
+    // default, uses the fixed rates in configuration. Two sources rather than one because they demonstrate
+    // different things: the fixed one shows the shape of the integration with nothing else running, and the
+    // AMM one shows what a reading off a real ledger does to it — a marginal price that is not the price
+    // for your size, a number that moves between refreshes, and a ledger index that is a ledger index.
+    if (string.Equals(builder.Configuration["Xrpl:Quotes:Source"], "amm", StringComparison.OrdinalIgnoreCase))
+    {
+        builder.Services.AddSingleton<IQuoteSource>(services => new AmmQuoteSource(
+            services.GetRequiredService<NodeConnection>()));
+    }
+    else
+    {
+        builder.Services.AddSingleton<IQuoteSource>(_ => new FixedRateQuoteSource(
+            quoteConfiguration.RatesByPairKey, quoteConfiguration.RefusedCurrencies));
+    }
 
     builder.Services.AddSingleton<SampleValuedHandler>();
     builder.Services.AddSingleton<IPaymentValuedHandler>(services => services.GetRequiredService<SampleValuedHandler>());
@@ -227,6 +244,13 @@ app.MapGet("/api/checkout/{buyerId}/price", async (string buyerId, CancellationT
             pair.QuoteIssuer,
             QuotePrice = DemoItemQuotePrice,
             InputAmount = inputAmount,
+
+            // What this size costs against what one unit costs. The two are the same number only for a
+            // source that ignores size — the shipped fixed-rate one does — and differ for any reading of
+            // real liquidity, which is the whole reason a quote takes an amount at all.
+            view.Result?.MarginalPrice,
+            view.Result?.EffectivePrice,
+            view.Result?.SlippagePercent,
             view.CapturedAt,
             view.Age,
             view.LedgerIndex,

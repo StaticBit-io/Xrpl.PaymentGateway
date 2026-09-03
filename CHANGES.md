@@ -37,6 +37,10 @@ nothing else gets no new background service and no new network traffic.
 - The sample can pay itself: set `Xrpl:Demo:PayerSeed` and the checkout page grows a send button per
   accepted asset, so a full demonstration needs one terminal rather than two. Test networks only — a seed
   in configuration is a private key in a text file.
+- The sample can also price off the ledger rather than off configuration: `Xrpl:Quotes:Source` picks
+  between the fixed-rate stand-in and an AMM source that reads the pair's pool from a validated ledger, so
+  slippage, a moving ask and a real ledger index are visible in the demo. `samples/seed-demo-stand.py`
+  builds the accounts, tokens and pools a standalone stand needs for it.
 
 Nothing in the 1.0.0 surface changed.
 

@@ -288,7 +288,14 @@ async function loadPrice(buyer) {
 
             const age = document.createElement("span");
             age.className = "hint";
-            age.textContent = `priced ${formatDuration(price.age)} ago at ledger ${price.ledgerIndex}`
+
+            // Slippage is what separates a price for this size from a price per unit. A source that
+            // ignores size reports none, and then the line simply does not mention it.
+            const slippage = price.slippagePercent > 0
+                ? `, ${price.slippagePercent.toFixed(3)}% below spot`
+                : "";
+
+            age.textContent = `priced ${formatDuration(price.age)} ago at ledger ${price.ledgerIndex}${slippage}`
                 + (price.isStale ? " — past the age limit, served anyway" : "");
 
             item.append(amount, age);
