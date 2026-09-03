@@ -28,9 +28,7 @@ internal static class QuoteSchedule
     /// <remarks>
     /// This measures spacing only — the sum of the delays this class hands out between pairs. It knows
     /// nothing about how long a capture itself takes, so it can answer true while the real refresh period
-    /// runs several times longer than <paramref name="interval"/>. For the actual number, see the
-    /// collector's own <c>QuoteRegistry.LastCycleDuration</c>, which times a whole cycle rather than
-    /// predicting one from its schedule.
+    /// runs several times longer than <paramref name="interval"/>.
     /// </remarks>
     public static bool CycleFitsInInterval(int pairCount, TimeSpan interval, TimeSpan minimumStagger) =>
         pairCount <= 0 || PairDelay(pairCount, interval, minimumStagger) * pairCount <= interval;

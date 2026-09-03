@@ -65,9 +65,6 @@ internal sealed class QuoteCollector : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            DateTimeOffset cycleStarted = _timeProvider.GetUtcNow();
-            _registry.SetCycleStarted(cycleStarted);
-
             foreach (QuotePair pair in _registry.Pairs)
             {
                 if (stoppingToken.IsCancellationRequested)
@@ -97,11 +94,6 @@ internal sealed class QuoteCollector : BackgroundService
                     return;
                 }
             }
-
-            // Measured, not predicted: QuoteSchedule.CycleFitsInInterval only checks the spacing between
-            // pairs and knows nothing about how long a capture itself takes, so this is what tells an
-            // operator the real refresh period rather than the one the schedule merely aimed for.
-            _registry.SetLastCycleDuration(_timeProvider.GetUtcNow() - cycleStarted);
         }
     }
 

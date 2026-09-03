@@ -16,12 +16,6 @@ internal sealed class QuoteRegistry
     private readonly ConcurrentDictionary<string, IQuoteSnapshot> _snapshots =
         new ConcurrentDictionary<string, IQuoteSnapshot>(StringComparer.Ordinal);
 
-    /// <summary>Ticks of the last full refresh cycle's duration, or -1 when no cycle has completed yet.</summary>
-    private long _lastCycleDurationTicks = -1;
-
-    /// <summary>Ticks of when the cycle currently in progress started, or -1 when none is in progress.</summary>
-    private long _cycleStartedTicks = -1;
-
     /// <summary>
     /// Whether the collector's most recent persist attempt reached the store, per pair. Absent means no
     /// write has been attempted for that pair yet — not a failure, since nothing has happened to fail.
@@ -66,44 +60,6 @@ internal sealed class QuoteRegistry
 
         _snapshots[pairKey] = snapshot;
     }
-
-    /// <summary>
-    /// How long the collector's last full refresh cycle actually took, or null before the first one
-    /// completes. Measured, not predicted — see <c>QuoteSchedule.CycleFitsInInterval</c>, which only
-    /// checks the spacing between pairs and knows nothing about how long a capture itself runs.
-    /// </summary>
-    /// <remarks>
-    /// Only ever reflects a cycle that finished. <see cref="CycleStartedAt"/> is the other half a caller
-    /// needs to notice a cycle that is running long right now — see <c>QuoteHealth.CheckAsync</c>, which
-    /// combines the two so the health report's own <c>LastCycleDuration</c> does not go quiet exactly when
-    /// a stall makes it matter most.
-    /// </remarks>
-    public TimeSpan? LastCycleDuration
-    {
-        get
-        {
-            long ticks = Interlocked.Read(ref _lastCycleDurationTicks);
-            return ticks < 0 ? null : TimeSpan.FromTicks(ticks);
-        }
-    }
-
-    /// <summary>Records how long a full refresh cycle just took.</summary>
-    public void SetLastCycleDuration(TimeSpan duration) =>
-        Interlocked.Exchange(ref _lastCycleDurationTicks, duration.Ticks);
-
-    /// <summary>When the cycle currently in progress started, or null when none is in progress (before the collector's first pass).</summary>
-    public DateTimeOffset? CycleStartedAt
-    {
-        get
-        {
-            long ticks = Interlocked.Read(ref _cycleStartedTicks);
-            return ticks < 0 ? null : new DateTimeOffset(ticks, TimeSpan.Zero);
-        }
-    }
-
-    /// <summary>Records that a new refresh cycle has started.</summary>
-    public void SetCycleStarted(DateTimeOffset startedAt) =>
-        Interlocked.Exchange(ref _cycleStartedTicks, startedAt.UtcTicks);
 
     /// <summary>
     /// Whether every pair's most recent persist attempt reached the store — <see cref="PairsFailingToPersist"/>

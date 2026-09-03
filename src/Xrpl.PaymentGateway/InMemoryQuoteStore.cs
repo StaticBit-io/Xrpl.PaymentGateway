@@ -60,8 +60,10 @@ public sealed class InMemoryQuoteStore : IQuoteStore
         }
     }
 
-    public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(
+        string pairKey, int limit, CancellationToken cancellationToken)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(pairKey);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
 
         lock (_gate)
@@ -69,11 +71,31 @@ public sealed class InMemoryQuoteStore : IQuoteStore
             // _order is already enqueue-ordered, so a plain filter over it is oldest-enqueued first.
             List<PaymentValuation> result = _order
                 .Select(hash => _valuations[hash])
-                .Where(entry => entry.State == ValuationState.Pending)
+                .Where(entry => entry.State == ValuationState.Pending
+                    && string.Equals(entry.PairKey, pairKey, StringComparison.Ordinal))
                 .Take(limit)
                 .ToList();
 
             return Task.FromResult<IReadOnlyList<PaymentValuation>>(result);
+        }
+    }
+
+    public Task<IReadOnlyList<PendingValuationsByPair>> GetPendingValuationBreakdownAsync(CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            List<PendingValuationsByPair> result = _valuations.Values
+                .Where(entry => entry.State == ValuationState.Pending)
+                .GroupBy(entry => entry.PairKey, StringComparer.Ordinal)
+                .Select(group => new PendingValuationsByPair
+                {
+                    PairKey = group.Key,
+                    Count = group.Count(),
+                    OldestEnqueuedAt = group.Min(entry => entry.EnqueuedAt),
+                })
+                .ToList();
+
+            return Task.FromResult<IReadOnlyList<PendingValuationsByPair>>(result);
         }
     }
 
@@ -85,8 +107,11 @@ public sealed class InMemoryQuoteStore : IQuoteStore
         {
             // A whole-object replace, so a caller moving an entry on from Failed simply builds the new
             // Valued/ValuedManually valuation without FailedAt/FailureReason set — there is nothing here
-            // that needs to clear them separately.
-            if (_valuations.ContainsKey(valuation.TransactionHash))
+            // that needs to clear them separately. Guarded by state: only an entry still Pending or Failed
+            // may be replaced, so a resolution racing another one (an operator's write-off landing between
+            // this read and this write, say) is left alone rather than silently overwritten.
+            if (_valuations.TryGetValue(valuation.TransactionHash, out PaymentValuation? current)
+                && current.State is ValuationState.Pending or ValuationState.Failed)
             {
                 _valuations[valuation.TransactionHash] = valuation;
             }
@@ -137,9 +162,13 @@ public sealed class InMemoryQuoteStore : IQuoteStore
 
         lock (_gate)
         {
+            // Starting from _order (enqueue order) and sorting with a stable OrderBy is what makes ties on
+            // FailedAt fall back to enqueue order, matching PostgresQuoteStore's
+            // "ORDER BY failed_at, queued_seq" rather than the unrelated order entries happened to fail in.
             List<PaymentValuation> result = _order
                 .Select(hash => _valuations[hash])
                 .Where(entry => entry.State == ValuationState.Failed)
+                .OrderBy(entry => entry.FailedAt)
                 .Skip(offset)
                 .Take(limit)
                 .ToList();
@@ -159,13 +188,18 @@ public sealed class InMemoryQuoteStore : IQuoteStore
     public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) =>
         Task.FromResult(Take(limit, entry => entry.State != ValuationState.Pending && !entry.Delivered));
 
-    public Task MarkValuationDeliveredAsync(string transactionHash, CancellationToken cancellationToken)
+    public Task MarkValuationDeliveredAsync(
+        string transactionHash, ValuationState deliveredState, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(transactionHash);
 
         lock (_gate)
         {
-            if (_valuations.TryGetValue(transactionHash, out PaymentValuation? entry))
+            // Only applies when the row is still in the state the caller actually handed to the host
+            // handler — otherwise an operator's resolution racing a slow delivery call for the stale
+            // content would be marked delivered on the resolution's behalf, and the resolution itself would
+            // never reach the host. Left alone here, the row stays undelivered for the next pass.
+            if (_valuations.TryGetValue(transactionHash, out PaymentValuation? entry) && entry.State == deliveredState)
             {
                 _valuations[transactionHash] = Deliver(entry);
             }

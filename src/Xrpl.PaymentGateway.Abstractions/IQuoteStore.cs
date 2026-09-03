@@ -30,10 +30,32 @@ public interface IQuoteStore
     Task<bool> TryEnqueueValuationAsync(PaymentValuation pending, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Up to <paramref name="limit"/> entries in <see cref="ValuationState.Pending"/>, oldest enqueued
-    /// first.
+    /// Up to <paramref name="limit"/> entries in <see cref="ValuationState.Pending"/> for one pair, oldest
+    /// enqueued first.
     /// </summary>
-    Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken);
+    /// <remarks>
+    /// Scoped to <paramref name="pairKey"/> so a pair whose snapshot is missing or stale cannot bury
+    /// payments on healthy pairs behind it in one shared queue — <c>ValuationWorker</c> decides per pair
+    /// whether it can price at all before ever calling this, so a broken pair costs only its own payments a
+    /// delay.
+    /// </remarks>
+    Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(
+        string pairKey, int limit, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// One row per pair currently holding at least one <see cref="ValuationState.Pending"/> entry.
+    /// </summary>
+    /// <remarks>
+    /// Two independent uses share this single call rather than each getting a capped, pair-blind read of
+    /// their own: <c>ValuationWorker</c> uses the pair keys alone, to notice a pending entry whose pair was
+    /// removed from configuration — since it otherwise only ever asks <see cref="GetPendingValuationsAsync"/>
+    /// about pairs still configured, and such an entry would never be looked at again — and
+    /// <c>QuoteHealth</c> uses <see cref="PendingValuationsByPair.Count"/> and
+    /// <see cref="PendingValuationsByPair.OldestEnqueuedAt"/> summed and minimised across every row, for the
+    /// true queue depth and age the health report exposes. Neither a page capped at the batch size nor one
+    /// scoped to a single pair could answer either question honestly.
+    /// </remarks>
+    Task<IReadOnlyList<PendingValuationsByPair>> GetPendingValuationBreakdownAsync(CancellationToken cancellationToken);
 
     /// <summary>
     /// Replaces a <see cref="ValuationState.Pending"/> or <see cref="ValuationState.Failed"/> entry with its
@@ -42,8 +64,14 @@ public interface IQuoteStore
     /// (an operator, via <see cref="IFailedValuationAdmin"/>) it is. Moving on from
     /// <see cref="ValuationState.Failed"/> clears <see cref="PaymentValuation.FailedAt"/> and
     /// <see cref="PaymentValuation.FailureReason"/> — the entry is resolved now, not failed and valued at
-    /// once.
+    /// once — and clears <see cref="PaymentValuation.Delivered"/>, since the resolved content is a new fact
+    /// the host has not heard yet even when the failed row it replaces was already delivered.
     /// </summary>
+    /// <remarks>
+    /// Only ever replaces an entry that is still <see cref="ValuationState.Pending"/> or
+    /// <see cref="ValuationState.Failed"/> — an entry already resolved some other way (an operator's
+    /// write-off racing this call, say) is left alone rather than silently overwritten.
+    /// </remarks>
     Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken);
 
     /// <summary>
@@ -63,7 +91,9 @@ public interface IQuoteStore
 
     /// <summary>
     /// Moves a <see cref="ValuationState.Failed"/> entry to <see cref="ValuationState.WrittenOff"/> for
-    /// good, at an operator's decision through <see cref="IFailedValuationAdmin"/>.
+    /// good, at an operator's decision through <see cref="IFailedValuationAdmin"/>. Also clears
+    /// <see cref="PaymentValuation.Delivered"/> — the write-off is a new fact the host has not heard yet
+    /// even when the failed row it replaces was already delivered.
     /// </summary>
     Task SaveWriteOffAsync(
         string transactionHash, string reason, DateTimeOffset writtenOffAt, CancellationToken cancellationToken);
@@ -90,9 +120,39 @@ public interface IQuoteStore
     /// </summary>
     Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken);
 
-    /// <summary>Marks a valuation as delivered to the host handler.</summary>
-    Task MarkValuationDeliveredAsync(string transactionHash, CancellationToken cancellationToken);
+    /// <summary>
+    /// Marks a valuation delivered, but only when it is still in <paramref name="deliveredState"/> — the
+    /// state the caller actually handed to the host handler.
+    /// </summary>
+    /// <remarks>
+    /// A precondition, not an unconditional write: without it, an entry an operator resolves — pricing it
+    /// manually or writing it off — while a slow handler call for its stale <see cref="ValuationState.Failed"/>
+    /// content is still in flight would have that content marked delivered on the operator's behalf, and the
+    /// resolution itself would never reach the host at all. Guarding the write against the row having moved
+    /// on in the meantime is what leaves it undelivered for the next pass to pick up correctly instead.
+    /// </remarks>
+    /// <param name="transactionHash">The entry to mark delivered.</param>
+    /// <param name="deliveredState">The state that was actually handed to the host handler.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    Task MarkValuationDeliveredAsync(
+        string transactionHash, ValuationState deliveredState, CancellationToken cancellationToken);
 
     /// <summary>The valuation for one payment, in any state, or null when there is none.</summary>
     Task<PaymentValuation?> GetValuationAsync(string transactionHash, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// How many <see cref="ValuationState.Pending"/> entries one pair holds, and the earliest of their
+/// <see cref="PaymentValuation.EnqueuedAt"/> values. See <see cref="IQuoteStore.GetPendingValuationBreakdownAsync"/>.
+/// </summary>
+public sealed class PendingValuationsByPair
+{
+    /// <summary>The pair, from <see cref="QuotePair.Key"/>.</summary>
+    public required string PairKey { get; init; }
+
+    /// <summary>How many <see cref="ValuationState.Pending"/> entries this pair holds right now.</summary>
+    public required int Count { get; init; }
+
+    /// <summary>The earliest <see cref="PaymentValuation.EnqueuedAt"/> among them.</summary>
+    public required DateTimeOffset OldestEnqueuedAt { get; init; }
 }
