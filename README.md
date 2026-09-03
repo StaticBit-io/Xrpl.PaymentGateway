@@ -329,3 +329,30 @@ To pay in an issued currency, the demo payer needs a trust line to its issuer an
 receiving account needs a trust line for the same currency, or the payment is rejected by the ledger before
 the gateway ever sees it. On a standalone stand that means creating an issuer, enabling `DefaultRipple` on
 it so its token can move between two holders, opening the trust lines, and funding the payer.
+
+### Reproducing the whole demo on a standalone stand
+
+The quote demo needs a token economy the ledger does not come with — an issuer whose tokens can move
+between two holders, a receiving account with a trust line for each token it accepts, and a payer holding
+a balance in each. `samples/seed-demo-stand.py` builds it and writes the configuration that goes with it:
+
+```bash
+docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml up -d
+python3 samples/seed-demo-stand.py --write samples/Xrpl.PaymentGateway.SampleApi/appsettings.Development.json
+ASPNETCORE_ENVIRONMENT=Development dotnet run --project samples/Xrpl.PaymentGateway.SampleApi
+```
+
+That gives the page all five assets at once: XRP and `GEM` priced into USD, `RLUSD` under the long hex
+code, USD accepted directly, and `JNK` — which the fixed-rate source refuses, so it lands in the operator's
+queue and gives the settle and write-off buttons something real to act on. The demo payer's buttons can
+send any of them.
+
+Every account comes from a fixed passphrase, so a second run against a live stand does nothing and a run
+against a recreated stand reproduces the same addresses. `--rpc` and `--node` point it at a stand on
+other ports; `XRPLPG_RPC_URL` and `XRPLPG_NODE_URL` do the same from the environment. Without `--write` it
+prints the configuration instead.
+
+`appsettings.Development.json` is git-ignored, because what the script writes into it includes the demo
+payer's seed. Its shape is committed beside it as `appsettings.Development.example.json`, with the
+addresses replaced by placeholders. And it is read only when the environment is `Development` — hence the
+variable above, since `dotnet run` in a fresh clone has no `launchSettings.json` to set it.
