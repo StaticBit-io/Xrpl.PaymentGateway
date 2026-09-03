@@ -44,7 +44,12 @@ public static class CurrencyKey
 
         if (trimmed.Length == 40 && IsHex(trimmed))
         {
-            return trimmed.ToUpperInvariant();
+            // The ledger's own encoding of XRP in a 160-bit currency field is all zero bytes — the field
+            // simply has no meaning for the native asset. Left uncaught here, that spelling falls through
+            // to the issued-currency branch below: a pair configured this way could never match a payment,
+            // and RequireIssuerConsistency, not recognising it as XRP, would demand an issuer XRP has none
+            // of — letting an XRP pair carrying an issuer be constructed in the first place.
+            return IsAllZero(trimmed) ? "XRP" : trimmed.ToUpperInvariant();
         }
 
         throw new ArgumentException(
@@ -60,6 +65,19 @@ public static class CurrencyKey
             bool lower = c is >= 'a' and <= 'f';
             bool upper = c is >= 'A' and <= 'F';
             if (!digit && !lower && !upper)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsAllZero(string value)
+    {
+        foreach (char c in value)
+        {
+            if (c != '0')
             {
                 return false;
             }
