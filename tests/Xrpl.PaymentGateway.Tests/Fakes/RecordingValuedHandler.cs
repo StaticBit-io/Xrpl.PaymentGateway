@@ -21,7 +21,14 @@ public sealed class RecordingValuedHandler : IPaymentValuedHandler
 
     public bool Throws { get; set; }
 
-    public Task OnPaymentValuedAsync(
+    /// <summary>
+    /// When set, awaited after recording a delivery but before returning — lets a test hold a call in
+    /// flight deterministically (an operator resolving the entry while this call has not yet completed,
+    /// say) rather than racing a fixed delay against the worker's own pass.
+    /// </summary>
+    public Func<Task>? BeforeReturning { get; set; }
+
+    public async Task OnPaymentValuedAsync(
         PaymentValuation valuation,
         string? buyerId,
         CancellationToken cancellationToken)
@@ -31,6 +38,14 @@ public sealed class RecordingValuedHandler : IPaymentValuedHandler
             _deliveries.Add((valuation, buyerId));
         }
 
-        return Throws ? Task.FromException(new InvalidOperationException("handler blew up")) : Task.CompletedTask;
+        if (BeforeReturning is { } hook)
+        {
+            await hook().ConfigureAwait(false);
+        }
+
+        if (Throws)
+        {
+            throw new InvalidOperationException("handler blew up");
+        }
     }
 }

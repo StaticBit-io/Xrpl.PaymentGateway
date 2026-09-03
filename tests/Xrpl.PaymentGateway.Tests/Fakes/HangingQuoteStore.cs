@@ -32,8 +32,12 @@ public sealed class HangingQuoteStore : IQuoteStore
         return true;
     }
 
-    public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken) =>
+    public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(
+        string pairKey, int limit, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<PaymentValuation>>(Array.Empty<PaymentValuation>());
+
+    public Task<IReadOnlyList<PendingValuationsByPair>> GetPendingValuationBreakdownAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<PendingValuationsByPair>>(Array.Empty<PendingValuationsByPair>());
 
     public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken) => Task.CompletedTask;
 
@@ -54,7 +58,9 @@ public sealed class HangingQuoteStore : IQuoteStore
     public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<PaymentValuation>>(Array.Empty<PaymentValuation>());
 
-    public Task MarkValuationDeliveredAsync(string transactionHash, CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task MarkValuationDeliveredAsync(
+        string transactionHash, ValuationState deliveredState, CancellationToken cancellationToken) =>
+        Task.CompletedTask;
 
     public Task<PaymentValuation?> GetValuationAsync(string transactionHash, CancellationToken cancellationToken) =>
         Task.FromResult<PaymentValuation?>(null);

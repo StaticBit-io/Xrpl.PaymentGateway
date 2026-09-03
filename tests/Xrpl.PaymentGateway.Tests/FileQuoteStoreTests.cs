@@ -49,7 +49,7 @@ public class FileQuoteStoreTests : QuoteStoreContract, IDisposable
         // If the failed attempt had left the hash marked queued in memory while the file never agreed,
         // this would be refused as a duplicate instead of accepted.
         Assert.True(await store.TryEnqueueValuationAsync(Pending("HASH1"), ct));
-        Assert.Single(await store.GetPendingValuationsAsync(10, ct));
+        Assert.Single(await store.GetPendingValuationsAsync("PAIR", 10, ct));
     }
 
     [Fact]
@@ -69,7 +69,7 @@ public class FileQuoteStoreTests : QuoteStoreContract, IDisposable
         // The write failed, so the file still holds the entry pending. In-memory state must agree: not
         // valued-but-undelivered (which would deliver it now from memory and, after a restart, price and
         // deliver it again from a file that never recorded the valuation at all).
-        IReadOnlyList<PaymentValuation> stillPending = await store.GetPendingValuationsAsync(10, ct);
+        IReadOnlyList<PaymentValuation> stillPending = await store.GetPendingValuationsAsync("PAIR", 10, ct);
         Assert.Single(stillPending);
         Assert.False(stillPending[0].IsValued);
         Assert.Empty(await store.GetUndeliveredValuationsAsync(10, ct));
