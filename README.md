@@ -295,12 +295,28 @@ a five-character code outright — and what the node reports back on every payme
 such a code to its name for display, so the asset still reads as `RLUSD` on the price line, on its pay
 button and on the payment row, while everything on the wire stays the code the ledger actually uses.
 
-The source behind the two priced pairs is `FixedRateQuoteSource`, a deliberate stand-in the sample ships
-with — fixed rates read straight from configuration, no network call at all. **Nothing about this prices
-anything real**; a real `IQuoteSource` reads liquidity off the ledger, and a real host brings its own
-pricing engine, the same way it brings its own `IPaymentStore`. `Xrpl:Quotes:RefusedCurrencies` names
-currencies that source throws for instead of pricing, which is what gives the unresolved queue and the
-settle/write-off buttons something genuine to act on in a demo that otherwise always prices cleanly.
+Where the prices come from is `Xrpl:Quotes:Source`, and the sample ships two answers to it.
+
+The default, with the key absent or set to anything else, is `FixedRateQuoteSource`: rates read straight
+from configuration, no network call at all. It shows the shape of the integration with nothing else
+running — no stand, no pools, no liquidity — and it prices nothing real. Size does not move its answer, and
+its `LedgerIndex` counts captures rather than naming a ledger. `Xrpl:Quotes:RefusedCurrencies` names
+currencies it throws for instead of pricing, which gives the unresolved queue and the settle and write-off
+buttons something to act on in a demo that otherwise always prices cleanly.
+
+`"Source": "amm"` switches to `AmmQuoteSource`, which reads the pair's AMM pool off a validated ledger and
+prices a size through the constant-product formula with the pool's own trading fee. Every number then comes
+from the ledger: the ask moves when the pool does, the ledger index is a real one, and the price for the
+size differs from the price per unit — the checkout line grows a "below spot" figure, which is slippage,
+and a valuation's `EffectivePrice` sits below its `MarginalPrice` for the same reason. An asset with no
+pool reads as having no liquidity, so it goes to the operator's queue like any other asset nothing can
+price it against.
+
+`AmmQuoteSource` is still a demonstration, not a quote engine: one pool, no order book, no routing through
+a third asset, no splitting a size across venues. A pair whose book is deeper than its pool is mispriced by
+it, and a pair with no pool reads as dry with an order book standing right there. A real host brings its
+own pricing, the same way it brings its own `IPaymentStore` — that is what `IQuoteSource` being an
+interface is for.
 
 ### Paying from the page
 
@@ -342,10 +358,15 @@ python3 samples/seed-demo-stand.py --write samples/Xrpl.PaymentGateway.SampleApi
 ASPNETCORE_ENVIRONMENT=Development dotnet run --project samples/Xrpl.PaymentGateway.SampleApi
 ```
 
-That gives the page all five assets at once: XRP and `GEM` priced into USD, `RLUSD` under the long hex
-code, USD accepted directly, and `JNK` — which the fixed-rate source refuses, so it lands in the operator's
-queue and gives the settle and write-off buttons something real to act on. The demo payer's buttons can
-send any of them.
+It also creates an AMM pool for each priced pair and writes `"Source": "amm"`, so the demo prices off the
+ledger rather than off fixed rates. That gives the page all five assets at once: XRP, `GEM` and `RLUSD` —
+the last under the long hex code — each priced into USD through its own pool, USD accepted directly, and
+`JNK`, which is issued with no pool at all, so nothing can price it and it lands in the operator's queue.
+The demo payer's buttons can send any of them.
+
+The pools are sized so their spot prices match the fixed rates the same configuration carries, which makes
+the two sources comparable: switch `Source` back and the asks move only by the pool's fee and the size's
+own slippage. Drop the line entirely and the stand's pools stop being read at all.
 
 Every account comes from a fixed passphrase, so a second run against a live stand does nothing and a run
 against a recreated stand reproduces the same addresses. `--rpc` and `--node` point it at a stand on

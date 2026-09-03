@@ -48,14 +48,32 @@ ISSUED = [
     ("JNK", "1", True),
 ]
 
+# The pools the prices are read from, as (received asset, its side of the pool, the quote asset's side).
+# Each ratio is the rate above, so a demo priced off the ledger lands near one priced off the fixed rates —
+# near, not on, because a pool charges a fee and a real size moves the price. `JNK` has no pool on purpose:
+# an asset with nothing to price it against is what the operator's queue exists for.
+POOLS = [
+    ("XRP", "100000", "50000"),
+    ("GEM", "20000", "50000"),
+    (RLUSD_HEX, "40000", "50000"),
+]
+
+# Half a percent, so slippage and the fee are both visible in a quote rather than lost in rounding.
+TRADING_FEE = 500
+
 TRUST_LIMIT = "1000000000"
 ISSUED_BALANCE = "100000"
 ACCOUNT_FUNDING_DROPS = "1000000000"
+
+# The liquidity provider funds both sides of every pool, so it needs XRP by the pool-full rather than by
+# the reserve: one pool's XRP side plus the reserves and the creation fees for all of them.
+LIQUIDITY_FUNDING_DROPS = "200000000000"
 
 ACCOUNTS = {
     "issuer": "xrplpg-demo-issuer",
     "gateway": "xrplpg-demo-gateway",
     "payer": "xrplpg-demo-payer",
+    "liquidity": "xrplpg-demo-liquidity",
 }
 
 ASF_DEFAULT_RIPPLE = 8
@@ -104,8 +122,8 @@ def default_ripple(url, account):
     return bool(info.get("account_flags", {}).get("defaultRipple"))
 
 
-def submit(url, secret, transaction, seq):
-    transaction = dict(transaction, Fee="12", Sequence=seq)
+def submit(url, secret, transaction, seq, fee="12"):
+    transaction = dict(transaction, Fee=fee, Sequence=seq)
     result = rpc(url, "submit", {"secret": secret, "tx_json": transaction})
     status = result.get("engine_result", "?")
 
@@ -131,18 +149,59 @@ def trust_lines(url, account):
     return {line["currency"]: line["balance"] for line in lines}
 
 
+def asset(currency, issuer):
+    """One side of a pool as amm_info names it."""
+    return {"currency": currency} if currency == "XRP" else {"currency": currency, "issuer": issuer}
+
+
+def pool_exists(url, currency, issuer):
+    try:
+        return "amm" in rpc(url, "amm_info", {
+            "asset": asset(currency, issuer),
+            "asset2": asset(QUOTE_CURRENCY, issuer),
+            "ledger_index": "validated",
+        })
+    except RpcError:
+        # The node answers a missing pool with an error, which is the ordinary case here rather than a
+        # problem: it is what "this pool has not been created yet" looks like.
+        return False
+
+
+def amm_create_fee(url):
+    """AMMCreate costs one owner reserve, not the ordinary fee, and the stand decides what that is."""
+    info = rpc(url, "server_info")["info"]
+    increment = info.get("validated_ledger", {}).get("reserve_inc_xrp", 2)
+    return str(int(float(increment) * 1_000_000))
+
+
+def liquidity_needs():
+    """How much of each token the pools consume, summed across them."""
+    needs = {QUOTE_CURRENCY: 0.0}
+    for currency, own_side, quote_side in POOLS:
+        needs[QUOTE_CURRENCY] += float(quote_side)
+        if currency != "XRP":
+            needs[currency] = needs.get(currency, 0.0) + float(own_side)
+
+    return needs
+
+
 def seed(url):
     accounts = {role: propose(url, passphrase) for role, passphrase in ACCOUNTS.items()}
     issuer, issuer_seed = accounts["issuer"]
     gateway, gateway_seed = accounts["gateway"]
     payer, payer_seed = accounts["payer"]
+    liquidity, liquidity_seed = accounts["liquidity"]
     currencies = [currency for currency, _, _ in ISSUED]
+    pooled = [currency for currency, _, _ in POOLS if currency != "XRP"] + [QUOTE_CURRENCY]
 
-    print(f"issuer   {issuer}\ngateway  {gateway}\npayer    {payer}", file=sys.stderr)
+    print(f"issuer    {issuer}\ngateway   {gateway}\npayer     {payer}\nliquidity {liquidity}",
+          file=sys.stderr)
 
-    # 1. Fund the three accounts from the stand's master account. Skipped for one that already
-    #    exists, which is what makes a second run against a live stand cost nothing.
-    unfunded = [account for account, _ in accounts.values() if not exists(url, account)]
+    # 1. Fund the accounts from the stand's master account. Skipped for one that already exists, which
+    #    is what makes a second run against a live stand cost nothing.
+    funding = {account: LIQUIDITY_FUNDING_DROPS if account == liquidity else ACCOUNT_FUNDING_DROPS
+               for account, _ in accounts.values()}
+    unfunded = [account for account in funding if not exists(url, account)]
     if unfunded:
         seq = sequence(url, MASTER_ACCOUNT)
         for offset, account in enumerate(unfunded):
@@ -150,11 +209,11 @@ def seed(url):
                 "TransactionType": "Payment",
                 "Account": MASTER_ACCOUNT,
                 "Destination": account,
-                "Amount": ACCOUNT_FUNDING_DROPS,
+                "Amount": funding[account],
             }, seq + offset)
 
-        wait_for(lambda: all(exists(url, account) for account, _ in accounts.values()),
-                 "the three accounts to validate")
+        wait_for(lambda: all(exists(url, account) for account in funding),
+                 "the accounts to validate")
 
     print("accounts funded", file=sys.stderr)
 
@@ -171,9 +230,12 @@ def seed(url):
 
     # 3. Trust lines. The receiving account needs one per issued currency it accepts, or the ledger
     #    rejects the payment before the gateway ever sees it, and so does the demo payer.
-    for holder, holder_seed in ((gateway, gateway_seed), (payer, payer_seed)):
+    for holder, holder_seed, wanted in (
+            (gateway, gateway_seed, currencies),
+            (payer, payer_seed, currencies),
+            (liquidity, liquidity_seed, pooled)):
         held = trust_lines(url, holder)
-        missing = [currency for currency in currencies if currency not in held]
+        missing = [currency for currency in wanted if currency not in held]
         if not missing:
             continue
 
@@ -186,7 +248,8 @@ def seed(url):
             }, seq + offset)
 
     wait_for(lambda: set(currencies) <= set(trust_lines(url, gateway))
-             and set(currencies) <= set(trust_lines(url, payer)), "the trust lines")
+             and set(currencies) <= set(trust_lines(url, payer))
+             and set(pooled) <= set(trust_lines(url, liquidity)), "the trust lines")
     print("trust lines open", file=sys.stderr)
 
     # 4. Give the demo payer something to pay with.
@@ -206,6 +269,48 @@ def seed(url):
                              for currency in currencies), "the payer's balances")
 
     print("payer funded", file=sys.stderr)
+
+    # 5. The liquidity provider, holding exactly what its pools will take.
+    needs = liquidity_needs()
+    balances = trust_lines(url, liquidity)
+    short = {currency: amount for currency, amount in needs.items()
+             if float(balances.get(currency, "0")) < amount}
+    if short:
+        seq = sequence(url, issuer)
+        for offset, (currency, amount) in enumerate(short.items()):
+            submit(url, issuer_seed, {
+                "TransactionType": "Payment",
+                "Account": issuer,
+                "Destination": liquidity,
+                "Amount": {"currency": currency, "issuer": issuer, "value": f"{amount:.6f}"},
+            }, seq + offset)
+
+        wait_for(lambda: all(float(trust_lines(url, liquidity).get(currency, "0")) >= amount
+                             for currency, amount in needs.items()),
+                 "the liquidity provider's balances")
+
+    # 6. The pools. Each is created once; an existing one is left alone, because recreating it is rejected
+    #    and depositing into it would move the very price this demo quotes.
+    fee = amm_create_fee(url)
+    for currency, own_side, quote_side in POOLS:
+        if pool_exists(url, currency, issuer):
+            continue
+
+        # AMMCreate takes the two sides as its two amounts, and XRP is the one written in drops.
+        own = ({"currency": currency, "issuer": issuer, "value": own_side} if currency != "XRP"
+               else str(int(float(own_side) * 1_000_000)))
+
+        submit(url, liquidity_seed, {
+            "TransactionType": "AMMCreate",
+            "Account": liquidity,
+            "Amount": own,
+            "Amount2": {"currency": QUOTE_CURRENCY, "issuer": issuer, "value": quote_side},
+            "TradingFee": TRADING_FEE,
+        }, sequence(url, liquidity), fee=fee)
+
+        wait_for(lambda currency=currency: pool_exists(url, currency, issuer), f"the {currency} pool")
+
+    print("pools created", file=sys.stderr)
     return issuer, gateway, payer, payer_seed
 
 
@@ -230,6 +335,9 @@ def configuration(node, issuer, gateway, payer_seed):
             "Nodes": [node],
             "Demo": {"PayerSeed": payer_seed},
             "Quotes": {
+                # The pools above are what backs this. Drop the line and the sample falls back to the
+                # fixed rates below, which is what it does with no stand at all.
+                "Source": "amm",
                 "QuoteCurrency": QUOTE_CURRENCY,
                 "QuoteIssuer": issuer,
                 "Pairs": pairs,
