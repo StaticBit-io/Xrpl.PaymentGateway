@@ -188,6 +188,17 @@ app.MapGet("/api/checkout/{buyerId}/price", async (string buyerId, CancellationT
             continue;
         }
 
+        // This is an ask, not a report: it is what the buyer is about to be told to send, so it is rounded
+        // up to the pair's own asset — XRP to the drop, an issued currency to fifteen significant digits —
+        // rather than to the nearest one. Rounding down here would ask for less than the invoice actually
+        // costs, and a buyer who sends exactly the figure shown would then be short. Done here, once,
+        // server-side, so the JSON the page renders and the JSON a future copy button would read are the
+        // same rounded number by construction, never two different amounts split across a display format
+        // and a raw value.
+        decimal? inputAmount = view.Result?.InputAmount is decimal rawInputAmount
+            ? AssetPrecision.RoundUpForAsk(rawInputAmount, pair.Currency)
+            : null;
+
         prices.Add(new
         {
             pair.Currency,
@@ -195,7 +206,7 @@ app.MapGet("/api/checkout/{buyerId}/price", async (string buyerId, CancellationT
             pair.QuoteCurrency,
             pair.QuoteIssuer,
             QuotePrice = DemoItemQuotePrice,
-            InputAmount = view.Result?.InputAmount,
+            InputAmount = inputAmount,
             view.CapturedAt,
             view.Age,
             view.LedgerIndex,
@@ -233,7 +244,7 @@ app.MapGet("/api/checkout/{buyerId}/valuations", (string buyerId) =>
             ReadableQuoteCurrency = quoteCurrency,
             valuation.State,
             valuation.Amount,
-            valuation.QuoteAmount,
+            QuoteAmount = RoundQuoteAmountForReport(valuation.QuoteAmount, quoteCurrency),
             valuation.EffectivePrice,
             valuation.FailureReason,
             valuation.WriteOffReason,
@@ -266,7 +277,7 @@ app.MapGet("/api/valuations", () =>
             ReadableQuoteCurrency = quoteCurrency,
             valuation.State,
             valuation.Amount,
-            valuation.QuoteAmount,
+            QuoteAmount = RoundQuoteAmountForReport(valuation.QuoteAmount, quoteCurrency),
             valuation.EffectivePrice,
             valuation.FailureReason,
             valuation.WriteOffReason,
@@ -321,7 +332,7 @@ app.MapGet("/api/quotes/unresolved", async (int? limit, int? offset, Cancellatio
             valuation.PairKey,
             ReadableCurrency = readableCurrency,
             ReadableQuoteCurrency = readableQuoteCurrency,
-            valuation.Amount,
+            Amount = RoundReceivedAmountForReport(valuation.Amount, readableCurrency),
             valuation.State,
             valuation.FailureReason,
             valuation.EnqueuedAt,
@@ -383,6 +394,20 @@ app.MapPost("/api/quotes/unresolved/{transactionHash}/write-off", async (
 });
 
 app.Run();
+
+// Both helpers below back a report, not an ask — a valuation and the unresolved queue describe money that
+// has already moved, so they round to the nearest expressible unit rather than up. See
+// AssetPrecision.RoundNearestForReport for why that direction is the deliberate choice here, and the
+// /api/checkout/{buyerId}/price handler above for the ask side, which rounds up instead.
+
+// The quote currency is only unknown when a valuation's PairKey no longer matches any configured pair —
+// not reachable with this sample's fixed startup configuration, but AssetPrecision still needs some
+// currency to round against, so it falls through to the issued-currency rule rather than throwing.
+decimal? RoundQuoteAmountForReport(decimal? quoteAmount, string? quoteCurrency) =>
+    quoteAmount is decimal amount ? AssetPrecision.RoundNearestForReport(amount, quoteCurrency ?? string.Empty) : null;
+
+decimal RoundReceivedAmountForReport(decimal amount, string? currency) =>
+    AssetPrecision.RoundNearestForReport(amount, currency ?? string.Empty);
 
 // What the unresolved operator endpoints above bind their request bodies to.
 internal sealed record SettleRequest(decimal Rate);
