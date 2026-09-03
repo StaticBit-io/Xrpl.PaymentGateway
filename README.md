@@ -133,6 +133,12 @@ See the [quotes reference](https://github.com/StaticBit-io/Xrpl.PaymentGateway/b
 Use a dedicated account that only receives. Specifically, it must not have `DefaultRipple` enabled and
 should not hold DEX offers or AMM positions.
 
+If the account is itself the issuer of a token it accepts, a payment in that token is a redemption, and
+the balance change the ledger reports for it names the sender as the issuer rather than the account. A
+quote pair configured for that asset never matches it, so the payment is recorded but never valued. This
+is a property of the protocol, not a defect here — issue tokens you accept from a separate account, not
+the one this library watches.
+
 If a payment addressed to you *also* debits the account, or credits two assets at once, the record is
 still written — it is a buyer's money and dropping it would lose a real payment — but it is logged as an
 error and increments `AnomalyCount` in the health report. Both shapes are physically impossible for an
