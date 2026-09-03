@@ -8,19 +8,21 @@
     <link rel="icon" href="data:," />
 </head>
 <body>
+    <!-- One strip for both health facts: the gateway monitor's own state, and — appended beside it,
+         separated visually rather than on a line of its own — the quotes pipeline's freshness. Hidden
+         until /api/quotes/health answers with something other than 404 — quotes are optional, and with no
+         pairs configured that half has nothing honest to say. When the API cannot be reached at all, both
+         halves would only repeat the same "not answering" fact under two ids, so app.js hides this half
+         rather than showing it twice. -->
     <header class="monitor" id="monitor" aria-live="polite">
         <span class="monitor-dot" id="monitor-dot"></span>
         <span class="monitor-text" id="monitor-text">checking the monitor&hellip;</span>
+        <span class="monitor-sep" id="quote-monitor-sep" hidden>&middot;</span>
+        <span class="monitor-dot" id="quote-monitor-dot" hidden></span>
+        <span class="monitor-text" id="quote-monitor-text" hidden>checking quote health&hellip;</span>
         <button type="button" id="reconcile" class="link" title="Redeliver anything the handler never accepted and re-verify recent ledgers">
             run reconciliation
         </button>
-    </header>
-
-    <!-- Hidden until /api/quotes/health answers with something other than 404 — quotes are optional, and
-         with no pairs configured this strip has nothing honest to say. -->
-    <header class="monitor" id="quote-monitor" aria-live="polite" hidden>
-        <span class="monitor-dot" id="quote-monitor-dot"></span>
-        <span class="monitor-text" id="quote-monitor-text">checking quote health&hellip;</span>
     </header>
 
     <main>

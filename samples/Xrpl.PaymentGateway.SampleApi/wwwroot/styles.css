@@ -94,6 +94,9 @@ h2 {
 
 .monitor-text { flex: 1; }
 
+/* Between the monitor's own state and the quotes pipeline's, when both are visible in the one strip. */
+.monitor-sep { flex: none; }
+
 .card {
     background: var(--surface);
     border: 1px solid var(--border);

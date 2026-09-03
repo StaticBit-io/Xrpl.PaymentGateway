@@ -62,6 +62,18 @@ const MONITOR_STATES = {
     HistoryGap: ["bad", "a ledger range could not be verified"],
 };
 
+/**
+ * Hides the quote-health half of the one status strip. Used when there is no pair configured (404) and
+ * when the API cannot be reached at all — in the latter case the monitor half already says "the sample API
+ * is not answering", and a second copy of the same fact under a different id would just be the strip
+ * repeating itself.
+ */
+function hideQuoteHealth() {
+    el("quote-monitor-sep").hidden = true;
+    el("quote-monitor-dot").hidden = true;
+    el("quote-monitor-text").hidden = true;
+}
+
 async function pollHealth() {
     try {
         // 503 is the expected answer whenever the monitor is not streaming, so the body is read either
@@ -87,6 +99,7 @@ async function pollHealth() {
     } catch {
         el("monitor-dot").className = "monitor-dot bad";
         el("monitor-text").textContent = "the sample API is not answering";
+        hideQuoteHealth();
     }
 }
 
@@ -120,13 +133,15 @@ async function pollQuoteHealth() {
     try {
         const response = await fetch("/api/quotes/health");
         if (response.status === 404) {
-            el("quote-monitor").hidden = true;
+            hideQuoteHealth();
             return;
         }
 
-        el("quote-monitor").hidden = false;
         const report = await response.json();
 
+        el("quote-monitor-sep").hidden = false;
+        el("quote-monitor-dot").hidden = false;
+        el("quote-monitor-text").hidden = false;
         el("quote-monitor-dot").className = `monitor-dot ${report.isHealthy ? "ok" : "warn"}`;
 
         const parts = [`${report.pairsWithFreshQuote}/${report.configuredPairs} pairs fresh`];
@@ -143,9 +158,10 @@ async function pollQuoteHealth() {
 
         el("quote-monitor-text").textContent = parts.join(" · ");
     } catch {
-        el("quote-monitor").hidden = false;
-        el("quote-monitor-dot").className = "monitor-dot bad";
-        el("quote-monitor-text").textContent = "the sample API is not answering";
+        // The main half of the strip reports "the sample API is not answering" when the fetch itself
+        // fails (pollHealth hits the same wall) — this half just steps out of the way instead of
+        // repeating that under a different id.
+        hideQuoteHealth();
     }
 }
 
