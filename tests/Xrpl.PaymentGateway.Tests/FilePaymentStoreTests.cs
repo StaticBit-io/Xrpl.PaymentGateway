@@ -79,6 +79,99 @@ public class FilePaymentStoreTests : PaymentStoreContract, IDisposable
         Assert.Contains(tag.ToString(), written);
     }
 
+    [Fact]
+    public async Task AFailedTryAddPaymentDoesNotBlockRetryingTheSameHash()
+    {
+        // Pre-existing defect, the same shape as FileQuoteStore's: TryAddPaymentAsync mutated _state and
+        // then called SaveAsync without rolling back on failure, so a payment that failed to persist would
+        // still read as stored in memory and refuse the retry that would repair it.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        IPaymentStore store = await CreateAsync();
+        PaymentRecord record = Record("HASH1");
+
+        using (BlockedSave())
+        {
+            await Assert.ThrowsAnyAsync<Exception>(() => store.TryAddPaymentAsync(record, ct));
+        }
+
+        Assert.True(await store.TryAddPaymentAsync(record, ct));
+        Assert.Single(await store.GetUnhandledPaymentsAsync(10, ct));
+    }
+
+    [Fact]
+    public async Task AFailedMarkHandledLeavesThePaymentUnhandled()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        IPaymentStore store = await CreateAsync();
+        await store.TryAddPaymentAsync(Record("HASH1"), ct);
+
+        using (BlockedSave())
+        {
+            await Assert.ThrowsAnyAsync<Exception>(() => store.MarkHandledAsync("HASH1", ct));
+        }
+
+        // The write failed, so the file still lists HASH1 unhandled. In-memory state must agree, or
+        // reconciliation would never see it as needing redelivery while a restart finds it unhandled again.
+        Assert.Single(await store.GetUnhandledPaymentsAsync(10, ct));
+    }
+
+    [Fact]
+    public async Task AFailedTagAssignmentDoesNotHandOutTheSameTagTwice()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        IPaymentStore store = await CreateAsync();
+
+        using (BlockedSave())
+        {
+            await Assert.ThrowsAnyAsync<Exception>(() => store.GetOrAssignTagAsync("buyer-1", ct));
+        }
+
+        // The write failed, so the file never agreed buyer-1 has a tag. If NextTag had not been rolled
+        // back, buyer-2 would receive the tag the failed call already handed out in memory.
+        uint firstTag = await store.GetOrAssignTagAsync("buyer-1", ct);
+        uint secondTag = await store.GetOrAssignTagAsync("buyer-2", ct);
+        Assert.NotEqual(firstTag, secondTag);
+    }
+
+    private static PaymentRecord Record(string hash) => new PaymentRecord
+    {
+        TransactionHash = hash,
+        TransactionType = "Payment",
+        Sender = "rnFApzSsKwXyTZtci4Z6nLVL8E1nLZzSBF",
+        Currency = "XRP",
+        Value = 1m,
+        LedgerIndex = 10,
+        ProcessedAt = DateTimeOffset.UnixEpoch,
+    };
+
+    /// <summary>
+    /// Makes the store's next save fail deterministically: <c>SaveAsync</c> writes to
+    /// <c>StatePath + ".tmp"</c> before the atomic rename, and creating a file where a directory of that
+    /// name already exists throws on every platform this runs on. Dispose removes the blocking directory.
+    /// </summary>
+    private IDisposable BlockedSave()
+    {
+        Directory.CreateDirectory(_directory);
+        string temporary = StatePath + ".tmp";
+        Directory.CreateDirectory(temporary);
+        return new BlockedSaveScope(temporary);
+    }
+
+    private sealed class BlockedSaveScope : IDisposable
+    {
+        private readonly string _temporary;
+
+        public BlockedSaveScope(string temporary) => _temporary = temporary;
+
+        public void Dispose()
+        {
+            if (Directory.Exists(_temporary))
+            {
+                Directory.Delete(_temporary);
+            }
+        }
+    }
+
     public void Dispose()
     {
         foreach (FilePaymentStore store in _opened)
