@@ -17,12 +17,25 @@ public sealed class QuoteOptionsValidator : IValidateOptions<QuoteOptions>
         else
         {
             HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+            HashSet<string> receivedAssets = new HashSet<string>(StringComparer.Ordinal);
             foreach (QuotePair pair in options.Pairs)
             {
                 if (!seen.Add(pair.Key))
                 {
                     // Canonical keys make this catch "XPM" and its hex form as one pair.
                     failures.Add($"duplicate pair {pair.Key}: the same asset is configured twice.");
+                }
+
+                // QuotePair.Matches identifies a received asset by currency and issuer alone, and
+                // QuoteRegistry.FindPair returns the first match — so a second pair naming the same
+                // received asset against a different quote currency would validate, refresh, and report
+                // healthy, yet never be reachable. One asset gets one quote currency.
+                string receivedAsset = $"{pair.CurrencyCanonical}.{pair.Issuer ?? "-"}";
+                if (!receivedAssets.Add(receivedAsset))
+                {
+                    failures.Add(
+                        $"asset {receivedAsset} is configured against more than one quote currency: "
+                        + "one asset can have only one quote currency.");
                 }
             }
         }

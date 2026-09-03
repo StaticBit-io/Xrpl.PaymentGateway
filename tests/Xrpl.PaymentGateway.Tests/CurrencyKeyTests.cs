@@ -31,6 +31,15 @@ public class CurrencyKeyTests
     }
 
     [Fact]
+    public void TheAllZeroFortyCharacterFormCanonicalizesToXrp()
+    {
+        // This is how the ledger itself encodes XRP in a 160-bit currency field: all zero bytes, because
+        // the field has no meaning for the native asset. Left uncaught, it would fall through to the
+        // issued-currency branch and never match "XRP".
+        Assert.Equal("XRP", CurrencyKey.Canonical("0000000000000000000000000000000000000000"));
+    }
+
+    [Fact]
     public void ANonStandardHexCodeIsKeptAsUppercaseHex()
     {
         string hex = "534F4C4F00000000000000000000000000000000";

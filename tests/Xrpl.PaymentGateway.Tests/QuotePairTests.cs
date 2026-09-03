@@ -77,6 +77,28 @@ public class QuotePairTests
     }
 
     [Fact]
+    public void TheAllZeroHexFormOfXrpMatchesAPaymentReportedThatWay()
+    {
+        // Before CurrencyKey.Canonical recognised the ledger's own all-zero encoding of XRP, a pair
+        // configured with the readable "XRP" spelling could never match a payment the balance reader
+        // reported in that hex form: the two would canonicalize to different keys.
+        QuotePair pair = new QuotePair("XPM", XpmIssuer, "XRP", null);
+
+        Assert.True(pair.Matches("XPM", XpmIssuer));
+        Assert.Contains("XRP", pair.Key, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheAllZeroHexFormOfXrpWithAnIssuerIsRejected()
+    {
+        // Before the fix this spelling fell through to the issued-currency branch, so
+        // RequireIssuerConsistency did not recognise it as XRP and let an XRP pair carrying an issuer be
+        // constructed.
+        Assert.Throws<ArgumentException>(
+            () => new QuotePair("0000000000000000000000000000000000000000", XpmIssuer, "USD", UsdIssuer));
+    }
+
+    [Fact]
     public void QuotingAnAssetAgainstItselfIsRejected()
     {
         Assert.Throws<ArgumentException>(() => new QuotePair("XPM", XpmIssuer, "XPM", XpmIssuer));
