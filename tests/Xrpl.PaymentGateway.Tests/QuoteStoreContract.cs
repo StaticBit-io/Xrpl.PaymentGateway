@@ -33,14 +33,14 @@ public abstract class QuoteStoreContract
         ConsecutiveFailures = failures,
     };
 
-    private static PaymentValuation Pending(string hash, decimal amount = 1000m) => new PaymentValuation
+    private static PaymentValuation Pending(string hash, decimal amount = 1000m, DateTimeOffset? enqueuedAt = null) => new PaymentValuation
     {
         TransactionHash = hash,
         PairKey = PairKey,
         Amount = amount,
         PaymentLedgerIndex = 901,
         DestinationTag = 42,
-        EnqueuedAt = new DateTimeOffset(2026, 8, 30, 12, 0, 5, TimeSpan.Zero),
+        EnqueuedAt = enqueuedAt ?? new DateTimeOffset(2026, 8, 30, 12, 0, 5, TimeSpan.Zero),
     };
 
     private static PaymentValuation Valued(PaymentValuation pending, decimal quoteAmount) => new PaymentValuation
@@ -269,6 +269,64 @@ public abstract class QuoteStoreContract
         Assert.Equal(3, page.Count);
         Assert.Equal("HASH1", page[0].TransactionHash);
         Assert.Equal("HASH3", page[2].TransactionHash);
+    }
+
+    [Fact]
+    public async Task AnAttemptedEntrySortsBehindOneThatHasNot()
+    {
+        IQuoteStore store = await CreateAsync();
+        await store.TryEnqueueValuationAsync(Pending("HASH1"), Ct);
+        await store.TryEnqueueValuationAsync(Pending("HASH2"), Ct);
+
+        // HASH1 was tried and is still unpriced; HASH2 has never been tried. Fairness means HASH2 goes
+        // first even though it was queued second — otherwise HASH1 would keep occupying the head of a
+        // queue it can never clear, starving everything queued behind it.
+        await store.MarkValuationAttemptedAsync(
+            "HASH1", new DateTimeOffset(2026, 8, 30, 12, 0, 10, TimeSpan.Zero), Ct);
+
+        IReadOnlyList<PaymentValuation> pending = await store.GetPendingValuationsAsync(10, Ct);
+
+        Assert.Equal(new[] { "HASH2", "HASH1" }, pending.Select(v => v.TransactionHash));
+    }
+
+    [Fact]
+    public async Task AmongAttemptedEntriesTheLeastRecentlyAttemptedGoesFirst()
+    {
+        IQuoteStore store = await CreateAsync();
+        await store.TryEnqueueValuationAsync(Pending("HASH1"), Ct);
+        await store.TryEnqueueValuationAsync(Pending("HASH2"), Ct);
+        await store.MarkValuationAttemptedAsync(
+            "HASH1", new DateTimeOffset(2026, 8, 30, 12, 0, 20, TimeSpan.Zero), Ct);
+        await store.MarkValuationAttemptedAsync(
+            "HASH2", new DateTimeOffset(2026, 8, 30, 12, 0, 10, TimeSpan.Zero), Ct);
+
+        IReadOnlyList<PaymentValuation> pending = await store.GetPendingValuationsAsync(10, Ct);
+
+        Assert.Equal(new[] { "HASH2", "HASH1" }, pending.Select(v => v.TransactionHash));
+    }
+
+    [Fact]
+    public async Task AnOldEntryAttemptedOnceStillOutranksAPaymentEnqueuedAfterThatAttempt()
+    {
+        // "Never-attempted first, then by attempt time" looks like the same fairness rule as ordering by
+        // COALESCE(last_attempt_at, enqueued_at), but it is not: it drops an entry that has been tried
+        // even once behind every payment queued afterwards, however much older it is. If arrivals keep
+        // the never-attempted group at or above the batch size, the stamped backlog is never fetched
+        // again — starvation, just moved to the whole attempted set instead of cured. This pins the
+        // correct rule: HASH1 is older, was tried once before HASH2 even existed, and must still be
+        // fetched ahead of it.
+        IQuoteStore store = await CreateAsync();
+        await store.TryEnqueueValuationAsync(
+            Pending("HASH1", enqueuedAt: new DateTimeOffset(2026, 8, 30, 12, 0, 0, TimeSpan.Zero)), Ct);
+        await store.MarkValuationAttemptedAsync(
+            "HASH1", new DateTimeOffset(2026, 8, 30, 12, 0, 10, TimeSpan.Zero), Ct);
+
+        await store.TryEnqueueValuationAsync(
+            Pending("HASH2", enqueuedAt: new DateTimeOffset(2026, 8, 30, 12, 0, 20, TimeSpan.Zero)), Ct);
+
+        IReadOnlyList<PaymentValuation> pending = await store.GetPendingValuationsAsync(10, Ct);
+
+        Assert.Equal(new[] { "HASH1", "HASH2" }, pending.Select(v => v.TransactionHash));
     }
 
     [Fact]

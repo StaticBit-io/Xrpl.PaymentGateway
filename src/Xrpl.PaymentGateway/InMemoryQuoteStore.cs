@@ -60,8 +60,43 @@ public sealed class InMemoryQuoteStore : IQuoteStore
         }
     }
 
-    public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken) =>
-        Task.FromResult(Take(limit, entry => !entry.IsValued));
+    public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+
+        lock (_gate)
+        {
+            // Ordered by when the entry was last considered, treating "never attempted" as its enqueue
+            // time. "Never-attempted first" looks like the same fairness rule but is not: it demotes any
+            // entry below every payment queued after its one attempt, so once arrivals keep the
+            // never-attempted group at or above the batch size the stamped backlog is never fetched
+            // again. A stable OrderBy over _order (already enqueue-ordered) makes enqueue time the
+            // tiebreak for free, matching queued_seq in the SQL store.
+            List<PaymentValuation> result = _order
+                .Select(hash => _valuations[hash])
+                .Where(entry => !entry.IsValued)
+                .OrderBy(entry => entry.LastAttemptAt ?? entry.EnqueuedAt)
+                .Take(limit)
+                .ToList();
+
+            return Task.FromResult<IReadOnlyList<PaymentValuation>>(result);
+        }
+    }
+
+    public Task MarkValuationAttemptedAsync(string transactionHash, DateTimeOffset attemptedAt, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(transactionHash);
+
+        lock (_gate)
+        {
+            if (_valuations.TryGetValue(transactionHash, out PaymentValuation? entry))
+            {
+                _valuations[transactionHash] = WithAttempt(entry, attemptedAt);
+            }
+        }
+
+        return Task.CompletedTask;
+    }
 
     public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken)
     {
@@ -140,6 +175,7 @@ public sealed class InMemoryQuoteStore : IQuoteStore
         PaymentLedgerIndex = entry.PaymentLedgerIndex,
         DestinationTag = entry.DestinationTag,
         EnqueuedAt = entry.EnqueuedAt,
+        LastAttemptAt = entry.LastAttemptAt,
         ValuedAt = entry.ValuedAt,
         QuoteAmount = entry.QuoteAmount,
         EffectivePrice = entry.EffectivePrice,
@@ -151,5 +187,27 @@ public sealed class InMemoryQuoteStore : IQuoteStore
         SnapshotLedgerIndex = entry.SnapshotLedgerIndex,
         SnapshotCapturedAt = entry.SnapshotCapturedAt,
         Delivered = true,
+    };
+
+    private static PaymentValuation WithAttempt(PaymentValuation entry, DateTimeOffset attemptedAt) => new PaymentValuation
+    {
+        TransactionHash = entry.TransactionHash,
+        PairKey = entry.PairKey,
+        Amount = entry.Amount,
+        PaymentLedgerIndex = entry.PaymentLedgerIndex,
+        DestinationTag = entry.DestinationTag,
+        EnqueuedAt = entry.EnqueuedAt,
+        LastAttemptAt = attemptedAt,
+        ValuedAt = entry.ValuedAt,
+        QuoteAmount = entry.QuoteAmount,
+        EffectivePrice = entry.EffectivePrice,
+        MarginalPrice = entry.MarginalPrice,
+        SlippagePercent = entry.SlippagePercent,
+        FullyFilled = entry.FullyFilled,
+        BookTruncated = entry.BookTruncated,
+        Route = entry.Route,
+        SnapshotLedgerIndex = entry.SnapshotLedgerIndex,
+        SnapshotCapturedAt = entry.SnapshotCapturedAt,
+        Delivered = entry.Delivered,
     };
 }

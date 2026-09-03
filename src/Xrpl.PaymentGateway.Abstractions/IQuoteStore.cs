@@ -29,8 +29,26 @@ public interface IQuoteStore
     /// <summary>Queues a payment for valuation. Returns false when the hash is already queued or valued.</summary>
     Task<bool> TryEnqueueValuationAsync(PaymentValuation pending, CancellationToken cancellationToken);
 
-    /// <summary>Up to <paramref name="limit"/> queued but not yet valued entries, oldest first.</summary>
+    /// <summary>
+    /// Up to <paramref name="limit"/> queued but not yet valued entries.
+    /// </summary>
+    /// <remarks>
+    /// The ordering is load-bearing, not incidental: never-attempted entries come before ever-attempted
+    /// ones, ever-attempted entries are ordered by <see cref="PaymentValuation.LastAttemptAt"/> ascending
+    /// (least-recently-attempted first), and entries tied on that — including every never-attempted entry,
+    /// which all tie — are ordered by enqueue time. An entry that can never be priced is then tried once
+    /// per sweep of the queue and moves to the back, rather than occupying the head forever and starving
+    /// everything queued behind it.
+    /// </remarks>
     Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Stamps <see cref="PaymentValuation.LastAttemptAt"/> for an entry, without changing anything else
+    /// about it. Called for every pending entry a pricing pass looked at, whether or not it could be priced,
+    /// so that <see cref="GetPendingValuationsAsync"/> can rotate past entries it cannot resolve. A no-op
+    /// when the hash is not queued or has already been valued.
+    /// </summary>
+    Task MarkValuationAttemptedAsync(string transactionHash, DateTimeOffset attemptedAt, CancellationToken cancellationToken);
 
     /// <summary>Replaces a queued entry with its computed valuation.</summary>
     Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken);

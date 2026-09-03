@@ -43,9 +43,28 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            StoredQuote? previous = _state.Quotes.FirstOrDefault(
+                q => string.Equals(q.PairKey, quote.PairKey, StringComparison.Ordinal));
             _state.Quotes.RemoveAll(q => string.Equals(q.PairKey, quote.PairKey, StringComparison.Ordinal));
             _state.Quotes.Add(quote);
-            await SaveAsync(cancellationToken).ConfigureAwait(false);
+
+            try
+            {
+                await SaveAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // The write failed, so the file still holds whatever it held before. In-memory state must
+                // match that exactly, or a caller told this call threw would see the new quote anyway on
+                // the next read — a mutation the disk never agreed to.
+                _state.Quotes.Remove(quote);
+                if (previous is not null)
+                {
+                    _state.Quotes.Add(previous);
+                }
+
+                throw;
+            }
         }
         finally
         {
@@ -94,7 +113,19 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
             }
 
             _state.Valuations.Add(pending);
-            await SaveAsync(cancellationToken).ConfigureAwait(false);
+
+            try
+            {
+                await SaveAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Otherwise the hash reads as queued in memory forever while the file never agreed, and
+                // the caller who retries on the exception is refused with "already queued".
+                _state.Valuations.Remove(pending);
+                throw;
+            }
+
             return true;
         }
         finally
@@ -104,7 +135,40 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
     }
 
     public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken) =>
-        TakeAsync(limit, entry => !entry.IsValued, cancellationToken);
+        TakeOrderedAsync(limit, entry => !entry.IsValued, cancellationToken);
+
+    public async Task MarkValuationAttemptedAsync(string transactionHash, DateTimeOffset attemptedAt, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(transactionHash);
+
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            int index = _state.Valuations.FindIndex(
+                v => string.Equals(v.TransactionHash, transactionHash, StringComparison.Ordinal));
+            if (index < 0)
+            {
+                return;
+            }
+
+            PaymentValuation previous = _state.Valuations[index];
+            _state.Valuations[index] = WithAttempt(previous, attemptedAt);
+
+            try
+            {
+                await SaveAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                _state.Valuations[index] = previous;
+                throw;
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
 
     public async Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken)
     {
@@ -120,8 +184,20 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
                 return;
             }
 
+            PaymentValuation previous = _state.Valuations[index];
             _state.Valuations[index] = valuation;
-            await SaveAsync(cancellationToken).ConfigureAwait(false);
+
+            try
+            {
+                await SaveAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Otherwise the entry reads as valued in memory while the file still holds it pending: it
+                // would be delivered now from memory and, after a restart, priced and delivered again.
+                _state.Valuations[index] = previous;
+                throw;
+            }
         }
         finally
         {
@@ -146,8 +222,18 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
                 return;
             }
 
-            _state.Valuations[index] = Delivered(_state.Valuations[index]);
-            await SaveAsync(cancellationToken).ConfigureAwait(false);
+            PaymentValuation previous = _state.Valuations[index];
+            _state.Valuations[index] = Delivered(previous);
+
+            try
+            {
+                await SaveAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                _state.Valuations[index] = previous;
+                throw;
+            }
         }
         finally
         {
@@ -202,6 +288,38 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
         }
     }
 
+    /// <summary>
+    /// Like <see cref="TakeAsync"/>, but ordered for fairness rather than plain enqueue order: by when the
+    /// entry was last considered, treating "never attempted" as its enqueue time. "Never-attempted first"
+    /// looks like the same fairness rule but is not: it demotes any entry below every payment queued after
+    /// its one attempt, so once arrivals keep the never-attempted group at or above the batch size the
+    /// stamped backlog is never fetched again — the same starvation, just moved to the whole attempted
+    /// set. <c>OrderBy</c> is a stable sort, and <see cref="State.Valuations"/> is already in enqueue
+    /// order, so entries tied on the key keep their enqueue order for free, matching queued_seq in the
+    /// SQL store.
+    /// </summary>
+    private async Task<IReadOnlyList<PaymentValuation>> TakeOrderedAsync(
+        int limit,
+        Func<PaymentValuation, bool> predicate,
+        CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return _state.Valuations
+                .Where(predicate)
+                .OrderBy(entry => entry.LastAttemptAt ?? entry.EnqueuedAt)
+                .Take(limit)
+                .ToList();
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     private static PaymentValuation Delivered(PaymentValuation entry) => new PaymentValuation
     {
         TransactionHash = entry.TransactionHash,
@@ -210,6 +328,7 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
         PaymentLedgerIndex = entry.PaymentLedgerIndex,
         DestinationTag = entry.DestinationTag,
         EnqueuedAt = entry.EnqueuedAt,
+        LastAttemptAt = entry.LastAttemptAt,
         ValuedAt = entry.ValuedAt,
         QuoteAmount = entry.QuoteAmount,
         EffectivePrice = entry.EffectivePrice,
@@ -221,6 +340,28 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
         SnapshotLedgerIndex = entry.SnapshotLedgerIndex,
         SnapshotCapturedAt = entry.SnapshotCapturedAt,
         Delivered = true,
+    };
+
+    private static PaymentValuation WithAttempt(PaymentValuation entry, DateTimeOffset attemptedAt) => new PaymentValuation
+    {
+        TransactionHash = entry.TransactionHash,
+        PairKey = entry.PairKey,
+        Amount = entry.Amount,
+        PaymentLedgerIndex = entry.PaymentLedgerIndex,
+        DestinationTag = entry.DestinationTag,
+        EnqueuedAt = entry.EnqueuedAt,
+        LastAttemptAt = attemptedAt,
+        ValuedAt = entry.ValuedAt,
+        QuoteAmount = entry.QuoteAmount,
+        EffectivePrice = entry.EffectivePrice,
+        MarginalPrice = entry.MarginalPrice,
+        SlippagePercent = entry.SlippagePercent,
+        FullyFilled = entry.FullyFilled,
+        BookTruncated = entry.BookTruncated,
+        Route = entry.Route,
+        SnapshotLedgerIndex = entry.SnapshotLedgerIndex,
+        SnapshotCapturedAt = entry.SnapshotCapturedAt,
+        Delivered = entry.Delivered,
     };
 
     private static State? Load(string path)
