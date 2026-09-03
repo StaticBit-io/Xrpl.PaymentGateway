@@ -47,6 +47,74 @@ public class PostgresQuoteStoreTests : QuoteStoreContract, IAsyncDisposable
     }
 
     [Fact]
+    public async Task EnsureSchemaAsyncAddsAMissingColumnToAValuationsTableThatPredatesIt()
+    {
+        // last_attempt_at was added to the valuations table's CREATE TABLE IF NOT EXISTS body only. On a
+        // database where the table already existed before that column shipped, CREATE TABLE IF NOT EXISTS
+        // is a no-op, and EnsureSchemaAsync used to report success while every later valuation query
+        // failed with "column last_attempt_at does not exist". Every other test in this class builds its
+        // schema from EnsureSchemaAsync itself, so the table always already has the column — this is the
+        // only shape of test that would have caught the gap: build the pre-existing table by hand, without
+        // the column, then run EnsureSchemaAsync and prove the queue actually works afterwards.
+        await SkipUnlessDatabaseIsReachableAsync();
+
+        await using (NpgsqlConnection connection = new NpgsqlConnection(ConnectionString))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            await using NpgsqlCommand create = new NpgsqlCommand(
+                $"""
+                CREATE SCHEMA IF NOT EXISTS "{_schema}";
+                CREATE TABLE "{_schema}".valuations (
+                    transaction_hash      TEXT        PRIMARY KEY,
+                    queued_seq            BIGSERIAL   NOT NULL,
+                    pair_key              TEXT        NOT NULL,
+                    amount                NUMERIC     NOT NULL,
+                    payment_ledger_index  BIGINT      NOT NULL,
+                    destination_tag       BIGINT      NULL,
+                    enqueued_at           TIMESTAMPTZ NOT NULL,
+                    valued_at             TIMESTAMPTZ NULL,
+                    quote_amount          NUMERIC     NULL,
+                    effective_price       NUMERIC     NULL,
+                    marginal_price        NUMERIC     NULL,
+                    slippage_percent      NUMERIC     NULL,
+                    fully_filled          BOOLEAN     NOT NULL DEFAULT FALSE,
+                    book_truncated        BOOLEAN     NOT NULL DEFAULT FALSE,
+                    route                 TEXT        NULL,
+                    snapshot_ledger_index BIGINT      NULL,
+                    snapshot_captured_at  TIMESTAMPTZ NULL,
+                    delivered             BOOLEAN     NOT NULL DEFAULT FALSE
+                );
+                """,
+                connection);
+            await create.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        _created = true;
+
+        PostgresQuoteStore store = new PostgresQuoteStore(ConnectionString, _schema);
+        await store.EnsureSchemaAsync(TestContext.Current.CancellationToken);
+
+        PaymentValuation pending = new PaymentValuation
+        {
+            TransactionHash = "PRE-EXISTING-SCHEMA",
+            PairKey = "PAIR",
+            Amount = 10m,
+            PaymentLedgerIndex = 1,
+            EnqueuedAt = DateTimeOffset.UtcNow,
+        };
+        Assert.True(await store.TryEnqueueValuationAsync(pending, TestContext.Current.CancellationToken));
+        Assert.Single(await store.GetPendingValuationsAsync(10, TestContext.Current.CancellationToken));
+
+        await store.MarkValuationAttemptedAsync(
+            "PRE-EXISTING-SCHEMA", DateTimeOffset.UtcNow, TestContext.Current.CancellationToken);
+
+        PaymentValuation? read = await store.GetValuationAsync(
+            "PRE-EXISTING-SCHEMA", TestContext.Current.CancellationToken);
+        Assert.NotNull(read);
+        Assert.NotNull(read!.LastAttemptAt);
+    }
+
+    [Fact]
     public void ASchemaNameThatIsNotAPlainIdentifierIsRejected()
     {
         Assert.Throws<ArgumentException>(

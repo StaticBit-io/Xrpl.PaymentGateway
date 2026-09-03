@@ -31,6 +31,9 @@ public sealed class FlakyQuoteStore : IQuoteStore
     public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken) =>
         _inner.GetPendingValuationsAsync(limit, cancellationToken);
 
+    public Task MarkValuationAttemptedAsync(string transactionHash, DateTimeOffset attemptedAt, CancellationToken cancellationToken) =>
+        _inner.MarkValuationAttemptedAsync(transactionHash, attemptedAt, cancellationToken);
+
     public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken)
     {
         if (string.Equals(valuation.TransactionHash, _failingHash, StringComparison.Ordinal) && _remainingFailures > 0)

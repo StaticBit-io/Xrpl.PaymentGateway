@@ -57,6 +57,7 @@ public sealed class PostgresQuoteStore : IQuoteStore
                 payment_ledger_index  BIGINT      NOT NULL,
                 destination_tag       BIGINT      NULL,
                 enqueued_at           TIMESTAMPTZ NOT NULL,
+                last_attempt_at       TIMESTAMPTZ NULL,
                 valued_at             TIMESTAMPTZ NULL,
                 quote_amount          NUMERIC     NULL,
                 effective_price       NUMERIC     NULL,
@@ -77,6 +78,12 @@ public sealed class PostgresQuoteStore : IQuoteStore
 
             CREATE INDEX IF NOT EXISTS valuations_undelivered
                 ON "{_schema}".valuations (queued_seq) WHERE valued_at IS NOT NULL AND delivered = FALSE;
+
+            -- EnsureSchemaAsync is the whole migration story for this store, not just table creation: on
+            -- a database where "valuations" already existed before last_attempt_at was introduced, the
+            -- CREATE TABLE IF NOT EXISTS above is a no-op and would otherwise leave the column missing,
+            -- so every valuation query fails with "column last_attempt_at does not exist" from then on.
+            ALTER TABLE "{_schema}".valuations ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ NULL;
             """;
 
         await using NpgsqlCommand command = new NpgsqlCommand(sql, connection);
@@ -181,7 +188,29 @@ public sealed class PostgresQuoteStore : IQuoteStore
     }
 
     public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken) =>
-        QueryValuationsAsync("valued_at IS NULL", limit, cancellationToken);
+        // Ordered by when the entry was last considered, treating "never attempted" as its enqueue time
+        // (COALESCE), with enqueue order as the final tiebreak. "Never-attempted first" looks like the
+        // same fairness rule but is not: it demotes any entry below every payment queued after its one
+        // attempt, so once arrivals keep the never-attempted group at or above the batch size the
+        // stamped backlog is never fetched again — the same starvation, just moved to the whole attempted
+        // set. Ordering by COALESCE(last_attempt_at, enqueued_at) makes a stamped entry compete on its own
+        // stamp and a fresh arrival compete on its enqueue time, so neither group can lock the other out.
+        QueryValuationsAsync(
+            "valued_at IS NULL", "COALESCE(last_attempt_at, enqueued_at), queued_seq", limit, cancellationToken);
+
+    public async Task MarkValuationAttemptedAsync(string transactionHash, DateTimeOffset attemptedAt, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(transactionHash);
+
+        await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using NpgsqlCommand command = new NpgsqlCommand(
+            $"""UPDATE "{_schema}".valuations SET last_attempt_at = @attempted WHERE transaction_hash = @hash""",
+            connection);
+        command.Parameters.AddWithValue("hash", transactionHash);
+        command.Parameters.AddWithValue("attempted", attemptedAt);
+
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
 
     public async Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken)
     {
@@ -222,7 +251,7 @@ public sealed class PostgresQuoteStore : IQuoteStore
     }
 
     public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) =>
-        QueryValuationsAsync("valued_at IS NOT NULL AND delivered = FALSE", limit, cancellationToken);
+        QueryValuationsAsync("valued_at IS NOT NULL AND delivered = FALSE", "queued_seq", limit, cancellationToken);
 
     public async Task MarkValuationDeliveredAsync(string transactionHash, CancellationToken cancellationToken)
     {
@@ -255,11 +284,12 @@ public sealed class PostgresQuoteStore : IQuoteStore
 
     private const string ValuationColumns =
         "transaction_hash, pair_key, amount, payment_ledger_index, destination_tag, enqueued_at, " +
-        "valued_at, quote_amount, effective_price, marginal_price, slippage_percent, fully_filled, " +
-        "book_truncated, route, snapshot_ledger_index, snapshot_captured_at, delivered";
+        "last_attempt_at, valued_at, quote_amount, effective_price, marginal_price, slippage_percent, " +
+        "fully_filled, book_truncated, route, snapshot_ledger_index, snapshot_captured_at, delivered";
 
     private async Task<IReadOnlyList<PaymentValuation>> QueryValuationsAsync(
         string predicate,
+        string orderBy,
         int limit,
         CancellationToken cancellationToken)
     {
@@ -270,7 +300,7 @@ public sealed class PostgresQuoteStore : IQuoteStore
             $"""
             SELECT {ValuationColumns} FROM "{_schema}".valuations
             WHERE {predicate}
-            ORDER BY queued_seq
+            ORDER BY {orderBy}
             LIMIT @limit
             """,
             connection);
@@ -309,17 +339,18 @@ public sealed class PostgresQuoteStore : IQuoteStore
         PaymentLedgerIndex = (uint)reader.GetInt64(3),
         DestinationTag = reader.IsDBNull(4) ? null : (uint)reader.GetInt64(4),
         EnqueuedAt = reader.GetFieldValue<DateTimeOffset>(5),
-        ValuedAt = reader.IsDBNull(6) ? null : reader.GetFieldValue<DateTimeOffset>(6),
-        QuoteAmount = reader.IsDBNull(7) ? null : reader.GetDecimal(7),
-        EffectivePrice = reader.IsDBNull(8) ? null : reader.GetDecimal(8),
-        MarginalPrice = reader.IsDBNull(9) ? null : reader.GetDecimal(9),
-        SlippagePercent = reader.IsDBNull(10) ? null : reader.GetDecimal(10),
-        FullyFilled = reader.GetBoolean(11),
-        BookTruncated = reader.GetBoolean(12),
-        Route = reader.IsDBNull(13) ? null : reader.GetString(13),
-        SnapshotLedgerIndex = reader.IsDBNull(14) ? null : (uint)reader.GetInt64(14),
-        SnapshotCapturedAt = reader.IsDBNull(15) ? null : reader.GetFieldValue<DateTimeOffset>(15),
-        Delivered = reader.GetBoolean(16),
+        LastAttemptAt = reader.IsDBNull(6) ? null : reader.GetFieldValue<DateTimeOffset>(6),
+        ValuedAt = reader.IsDBNull(7) ? null : reader.GetFieldValue<DateTimeOffset>(7),
+        QuoteAmount = reader.IsDBNull(8) ? null : reader.GetDecimal(8),
+        EffectivePrice = reader.IsDBNull(9) ? null : reader.GetDecimal(9),
+        MarginalPrice = reader.IsDBNull(10) ? null : reader.GetDecimal(10),
+        SlippagePercent = reader.IsDBNull(11) ? null : reader.GetDecimal(11),
+        FullyFilled = reader.GetBoolean(12),
+        BookTruncated = reader.GetBoolean(13),
+        Route = reader.IsDBNull(14) ? null : reader.GetString(14),
+        SnapshotLedgerIndex = reader.IsDBNull(15) ? null : (uint)reader.GetInt64(15),
+        SnapshotCapturedAt = reader.IsDBNull(16) ? null : reader.GetFieldValue<DateTimeOffset>(16),
+        Delivered = reader.GetBoolean(17),
     };
 
     private async Task<NpgsqlConnection> OpenAsync(CancellationToken cancellationToken)

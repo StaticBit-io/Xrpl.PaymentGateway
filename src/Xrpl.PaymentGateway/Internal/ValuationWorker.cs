@@ -90,18 +90,23 @@ internal sealed class ValuationWorker : BackgroundService
             {
                 // The pair was removed from configuration after the payment was queued. Leaving it queued
                 // keeps the record: put the pair back and it prices, drop the row and it is gone for good.
+                // Stamping the attempt is what keeps this entry from pinning the head of the queue forever
+                // and starving every payment behind it — see GetPendingValuationsAsync's ordering contract.
+                await MarkAttemptedAsync(entry.TransactionHash, stoppingToken).ConfigureAwait(false);
                 continue;
             }
 
             IQuoteSnapshot? snapshot = await SnapshotForAsync(pair, stoppingToken).ConfigureAwait(false);
             if (snapshot is null)
             {
+                await MarkAttemptedAsync(entry.TransactionHash, stoppingToken).ConfigureAwait(false);
                 continue;
             }
 
             if (_timeProvider.GetUtcNow() - snapshot.CapturedAt > _options.EffectiveMaxQuoteAge
                 && _options.RefuseStaleQuotes)
             {
+                await MarkAttemptedAsync(entry.TransactionHash, stoppingToken).ConfigureAwait(false);
                 continue;
             }
 
@@ -119,11 +124,13 @@ internal sealed class ValuationWorker : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "pricing payment {Hash} failed; it stays queued", entry.TransactionHash);
+                await MarkAttemptedAsync(entry.TransactionHash, stoppingToken).ConfigureAwait(false);
                 continue;
             }
 
             if (result is null)
             {
+                await MarkAttemptedAsync(entry.TransactionHash, stoppingToken).ConfigureAwait(false);
                 continue;
             }
 
@@ -141,7 +148,30 @@ internal sealed class ValuationWorker : BackgroundService
                 // that rejects this particular write (a decimal a column cannot hold, say) must not stop
                 // the payment behind it from being reached.
                 _logger.LogError(ex, "saving the valuation of {Hash} failed; it stays queued", entry.TransactionHash);
+                await MarkAttemptedAsync(entry.TransactionHash, stoppingToken).ConfigureAwait(false);
             }
+        }
+    }
+
+    /// <summary>
+    /// Stamps the attempt so a pending entry that cannot be priced rotates to the back of the queue
+    /// instead of pinning its head. A failure here is logged and swallowed like any other store hiccup on
+    /// this path: the entry stays queued and simply gets another chance next pass.
+    /// </summary>
+    private async Task MarkAttemptedAsync(string transactionHash, CancellationToken stoppingToken)
+    {
+        try
+        {
+            await _quotes.MarkValuationAttemptedAsync(transactionHash, _timeProvider.GetUtcNow(), stoppingToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "recording an attempt for {Hash} failed", transactionHash);
         }
     }
 

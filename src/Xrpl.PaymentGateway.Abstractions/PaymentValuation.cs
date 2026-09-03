@@ -33,6 +33,15 @@ public sealed class PaymentValuation
     /// <summary>When the payment entered the valuation queue.</summary>
     public required DateTimeOffset EnqueuedAt { get; init; }
 
+    /// <summary>
+    /// When pricing this entry was last attempted, successfully or not. Null while it has never been
+    /// tried. Drives the fairness ordering of <see cref="IQuoteStore.GetPendingValuationsAsync"/>: without
+    /// it, an entry that can never be priced — its pair was removed from configuration, its evaluation
+    /// throws deterministically, its save is rejected by the store — would occupy the head of an
+    /// oldest-first queue forever and starve every payment queued behind it.
+    /// </summary>
+    public DateTimeOffset? LastAttemptAt { get; init; }
+
     /// <summary>When the valuation was computed. Null while it is still queued.</summary>
     public DateTimeOffset? ValuedAt { get; init; }
 
