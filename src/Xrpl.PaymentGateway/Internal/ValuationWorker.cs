@@ -9,13 +9,16 @@ namespace Xrpl.PaymentGateway.Internal;
 /// Prices queued payments and delivers the results.
 /// </summary>
 /// <remarks>
-/// Runs behind the payment path, never on it. A payment that cannot be priced for a transient, pair-wide
-/// reason — no snapshot yet, or a stale one — simply stays queued: the money is already recorded and its
-/// receipt already announced, so waiting costs nothing but a later number. A payment that cannot be priced
-/// for a per-entry, non-transient reason — its pair is gone, pricing it threw, the pair has no liquidity,
-/// or the store rejected the row — is moved to <see cref="ValuationState.Failed"/> instead of retried
-/// forever: see <see cref="ValuePendingAsync"/> and <see cref="IFailedValuationAdmin"/>, the operator path
-/// a failed entry then waits on.
+/// Runs behind the payment path, never on it. The pending queue is per pair: for each configured pair this
+/// worker decides whether it can price at all — a snapshot exists and, when required, is fresh — before
+/// ever asking the store for that pair's entries, so a pair with no usable snapshot costs only its own
+/// payments a delay and nothing to the pairs behind it. A payment that cannot be priced for a transient,
+/// pair-wide reason — no snapshot yet, a stale one, the snapshot answering "no liquidity right now", or the
+/// store rejecting the write that would move it on — simply stays queued: the money is already recorded
+/// and its receipt already announced, so waiting costs nothing but a later number. A payment that cannot be
+/// priced for a per-entry, non-transient reason — its pair is gone, or pricing it threw — is moved to
+/// <see cref="ValuationState.Failed"/> instead of retried forever: see <see cref="ValuePendingAsync"/> and
+/// <see cref="IFailedValuationAdmin"/>, the operator path a failed entry then waits on.
 /// </remarks>
 internal sealed class ValuationWorker : BackgroundService
 {
@@ -80,95 +83,142 @@ internal sealed class ValuationWorker : BackgroundService
 
     private async Task ValuePendingAsync(CancellationToken stoppingToken)
     {
+        foreach (QuotePair pair in _registry.Pairs)
+        {
+            stoppingToken.ThrowIfCancellationRequested();
+            await ValuePendingForPairAsync(pair, stoppingToken).ConfigureAwait(false);
+        }
+
+        // GetPendingValuationsAsync only ever asks about a currently configured pair, so an entry whose
+        // pair was removed from configuration after it was queued would otherwise never be looked at
+        // again — not priced, not failed, just stuck. The breakdown is the one place a pair key with
+        // pending work surfaces regardless of configuration, which is what makes that entry reachable.
+        IReadOnlyList<PendingValuationsByPair> breakdown = await _quotes
+            .GetPendingValuationBreakdownAsync(stoppingToken)
+            .ConfigureAwait(false);
+
+        foreach (PendingValuationsByPair bucket in breakdown)
+        {
+            stoppingToken.ThrowIfCancellationRequested();
+
+            bool stillConfigured = _registry.Pairs
+                .Any(p => string.Equals(p.Key, bucket.PairKey, StringComparison.Ordinal));
+            if (stillConfigured)
+            {
+                continue;
+            }
+
+            await FailOrphanedPairAsync(bucket.PairKey, stoppingToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Prices one configured pair's pending entries, having already decided this pass can price the pair
+    /// at all — no snapshot, or a stale one with <see cref="QuoteOptions.RefuseStaleQuotes"/> set, means the
+    /// whole pair is skipped this pass without ever asking the store for its entries.
+    /// </summary>
+    private async Task ValuePendingForPairAsync(QuotePair pair, CancellationToken stoppingToken)
+    {
+        IQuoteSnapshot? snapshot = await SnapshotForAsync(pair, stoppingToken).ConfigureAwait(false);
+        if (snapshot is null)
+        {
+            // Transient and shared by every entry against this pair: nothing has been captured for it
+            // yet, or the last capture failed. Every entry simply stays queued and prices itself once a
+            // snapshot exists — nothing to record here.
+            return;
+        }
+
+        if (_timeProvider.GetUtcNow() - snapshot.CapturedAt > _options.EffectiveMaxQuoteAge
+            && _options.RefuseStaleQuotes)
+        {
+            // Transient for the same reason: the next successful refresh clears this on its own.
+            return;
+        }
+
         IReadOnlyList<PaymentValuation> pending = await _quotes
-            .GetPendingValuationsAsync(_options.ValuationBatchSize, stoppingToken)
+            .GetPendingValuationsAsync(pair.Key, _options.ValuationBatchSize, stoppingToken)
             .ConfigureAwait(false);
 
         foreach (PaymentValuation entry in pending)
         {
             stoppingToken.ThrowIfCancellationRequested();
+            await PriceAsync(entry, snapshot, stoppingToken).ConfigureAwait(false);
+        }
+    }
 
-            QuotePair? pair = _registry.Pairs
-                .FirstOrDefault(p => string.Equals(p.Key, entry.PairKey, StringComparison.Ordinal));
-            if (pair is null)
-            {
-                // Per-entry, and nothing will re-add a removed pair behind this worker's back — terminal,
-                // not transient.
-                await FailAsync(
-                        entry.TransactionHash,
-                        $"pair \"{entry.PairKey}\" is no longer configured",
-                        stoppingToken)
-                    .ConfigureAwait(false);
-                continue;
-            }
+    /// <summary>Prices one entry against an already-current snapshot for its pair.</summary>
+    private async Task PriceAsync(PaymentValuation entry, IQuoteSnapshot snapshot, CancellationToken stoppingToken)
+    {
+        QuoteResult? result;
+        try
+        {
+            result = await snapshot
+                .EvaluateAsync(entry.Amount, QuoteDirection.ExactInput, stoppingToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Per-entry and deterministic: the same amount against the same snapshot throws the same
+            // way every time, so leaving it queued would only spend the next pass reproducing this one.
+            // Terminal.
+            _logger.LogError(ex, "pricing payment {Hash} failed", entry.TransactionHash);
+            await FailAsync(entry.TransactionHash, $"pricing threw: {ex.Message}", stoppingToken)
+                .ConfigureAwait(false);
+            return;
+        }
 
-            IQuoteSnapshot? snapshot = await SnapshotForAsync(pair, stoppingToken).ConfigureAwait(false);
-            if (snapshot is null)
-            {
-                // Transient and shared by every entry against this pair: nothing has been captured for it
-                // yet, or the last capture failed. The entry simply stays queued and prices itself once a
-                // snapshot exists — nothing to record here.
-                continue;
-            }
+        if (result is null)
+        {
+            // The snapshot cannot trade this amount right now — the next capture may price it fine.
+            // Transient and shared by nothing else about this entry, so it simply stays queued rather than
+            // being parked in the operator queue over what may be a passing condition.
+            return;
+        }
 
-            if (_timeProvider.GetUtcNow() - snapshot.CapturedAt > _options.EffectiveMaxQuoteAge
-                && _options.RefuseStaleQuotes)
-            {
-                // Transient for the same reason: the next successful refresh clears this on its own.
-                continue;
-            }
+        try
+        {
+            await _quotes.SaveValuationAsync(Complete(entry, result, snapshot), stoppingToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // A store write failure is the archetypal transient error — a timeout, a dropped connection, a
+            // deadlock — not evidence this row can never be saved. The entry stays Pending and is priced
+            // again next pass; nothing here parks a correctly priced payment in the operator queue over a
+            // momentary store blip.
+            _logger.LogError(ex, "saving the valuation of {Hash} failed; it stays pending and is retried", entry.TransactionHash);
+        }
+    }
 
-            QuoteResult? result;
-            try
-            {
-                result = await snapshot
-                    .EvaluateAsync(entry.Amount, QuoteDirection.ExactInput, stoppingToken)
-                    .ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                // Per-entry and deterministic: the same amount against the same snapshot throws the same
-                // way every time, so leaving it queued would only spend the next pass reproducing this one.
-                // Terminal.
-                _logger.LogError(ex, "pricing payment {Hash} failed", entry.TransactionHash);
-                await FailAsync(entry.TransactionHash, $"pricing threw: {ex.Message}", stoppingToken)
-                    .ConfigureAwait(false);
-                continue;
-            }
+    /// <summary>
+    /// Fails every pending entry against a pair key the registry no longer configures — the one per-entry,
+    /// non-transient cause this worker can reach without ever asking the store about an unconfigured pair
+    /// on the pricing path itself.
+    /// </summary>
+    private async Task FailOrphanedPairAsync(string pairKey, CancellationToken stoppingToken)
+    {
+        IReadOnlyList<PaymentValuation> orphaned = await _quotes
+            .GetPendingValuationsAsync(pairKey, _options.ValuationBatchSize, stoppingToken)
+            .ConfigureAwait(false);
 
-            if (result is null)
-            {
-                // The pair currently has no liquidity to trade this amount against. Terminal: nothing
-                // retries this on a timer, and an operator — see IFailedValuationAdmin — is what moves it
-                // on from here, whether that means pricing it manually once liquidity is known some other
-                // way, or writing it off.
-                await FailAsync(entry.TransactionHash, "the pair currently has no liquidity", stoppingToken)
-                    .ConfigureAwait(false);
-                continue;
-            }
+        foreach (PaymentValuation entry in orphaned)
+        {
+            stoppingToken.ThrowIfCancellationRequested();
 
-            try
-            {
-                await _quotes.SaveValuationAsync(Complete(entry, result, snapshot), stoppingToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                // Same failure class the evaluation catch above guards against, one line later: a store
-                // that rejects this particular row (a decimal a column cannot hold, say) will reject it
-                // again next pass too. Terminal.
-                _logger.LogError(ex, "saving the valuation of {Hash} failed", entry.TransactionHash);
-                await FailAsync(
-                        entry.TransactionHash, $"the store rejected the valuation: {ex.Message}", stoppingToken)
-                    .ConfigureAwait(false);
-            }
+            // Per-entry, and nothing will re-add a removed pair behind this worker's back — terminal,
+            // not transient.
+            await FailAsync(
+                    entry.TransactionHash,
+                    $"pair \"{pairKey}\" is no longer configured",
+                    stoppingToken)
+                .ConfigureAwait(false);
         }
     }
 
@@ -239,7 +289,15 @@ internal sealed class ValuationWorker : BackgroundService
                     : null;
 
                 await _handler.OnPaymentValuedAsync(entry, buyerId, stoppingToken).ConfigureAwait(false);
-                await _quotes.MarkValuationDeliveredAsync(entry.TransactionHash, stoppingToken).ConfigureAwait(false);
+
+                // Conditional on the row still being in the state actually handed to the handler above: if
+                // an operator resolved this entry (pricing it manually or writing it off) while the handler
+                // call was in flight, the mark must not land on that newer row — see
+                // IQuoteStore.MarkValuationDeliveredAsync. Left undelivered here, the resolved content is
+                // what the very next pass hands to the handler instead.
+                await _quotes
+                    .MarkValuationDeliveredAsync(entry.TransactionHash, entry.State, stoppingToken)
+                    .ConfigureAwait(false);
 
                 _logger.LogInformation(
                     "payment {Hash} reached {State} (quote {Quote}, buyer {Buyer})",

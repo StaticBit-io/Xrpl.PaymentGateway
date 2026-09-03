@@ -9,10 +9,12 @@ namespace Xrpl.PaymentGateway.Abstractions;
 public enum ValuationState
 {
     /// <summary>
-    /// Queued, not yet priced. Only the transient causes leave an entry here: no snapshot has been
-    /// captured for the pair yet, or the held one is past its age limit. Both cure themselves — the entry
-    /// prices itself as soon as a usable snapshot exists — so nothing here is ever retried on a timer or
-    /// counted against it.
+    /// Queued, not yet priced. Only transient causes leave an entry here: no snapshot has been captured for
+    /// the pair yet, the held one is past its age limit, the snapshot answered that the pair currently has
+    /// no liquidity to price this amount against, or the store rejected the write that would have moved the
+    /// entry on. Every one of these cures itself — a later snapshot, a later capture, a later store write —
+    /// so nothing here is ever retried on a timer or counted against it; the entry simply prices itself once
+    /// conditions allow.
     /// </summary>
     Pending,
 
@@ -23,10 +25,11 @@ public enum ValuationState
     ValuedManually,
 
     /// <summary>
-    /// Terminal. Reached only for a per-entry, non-transient cause: the pair is no longer configured,
-    /// pricing it threw, the pair currently holds no liquidity to price against, or the store rejected this
-    /// specific row on save. Never retried automatically — see <see cref="IFailedValuationAdmin"/> for the
-    /// operator path this state waits on.
+    /// Terminal. Reached only for a per-entry, non-transient cause: the pair is no longer configured, or
+    /// pricing it threw. Both are deterministic — another attempt cannot change either outcome — which is
+    /// what distinguishes them from a transient, pair-wide condition like a missing snapshot or "no
+    /// liquidity right now", none of which fail an entry; see <see cref="Pending"/>. Never retried
+    /// automatically — see <see cref="IFailedValuationAdmin"/> for the operator path this state waits on.
     /// </summary>
     Failed,
 

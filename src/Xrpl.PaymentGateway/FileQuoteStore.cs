@@ -134,8 +134,39 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
         }
     }
 
-    public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken) =>
-        TakeAsync(limit, entry => entry.State == ValuationState.Pending, cancellationToken);
+    public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(
+        string pairKey, int limit, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(pairKey);
+        return TakeAsync(
+            limit,
+            entry => entry.State == ValuationState.Pending
+                && string.Equals(entry.PairKey, pairKey, StringComparison.Ordinal),
+            cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<PendingValuationsByPair>> GetPendingValuationBreakdownAsync(
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return _state.Valuations
+                .Where(entry => entry.State == ValuationState.Pending)
+                .GroupBy(entry => entry.PairKey, StringComparer.Ordinal)
+                .Select(group => new PendingValuationsByPair
+                {
+                    PairKey = group.Key,
+                    Count = group.Count(),
+                    OldestEnqueuedAt = group.Min(entry => entry.EnqueuedAt),
+                })
+                .ToList();
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
 
     public async Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken)
     {
@@ -152,6 +183,14 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
             }
 
             PaymentValuation previous = _state.Valuations[index];
+            // Guarded by state: only an entry still Pending or Failed may be replaced, so a resolution
+            // racing another one (an operator's write-off landing between this read and this write, say)
+            // is left alone rather than silently overwritten.
+            if (previous.State is not (ValuationState.Pending or ValuationState.Failed))
+            {
+                return;
+            }
+
             // A whole-object replace: a caller moving an entry on from Failed simply builds the new
             // Valued/ValuedManually valuation without FailedAt/FailureReason set, which is what clears them.
             _state.Valuations[index] = valuation;
@@ -253,8 +292,12 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            // _state.Valuations is already in enqueue order (append-only), so a stable OrderBy over it
+            // makes ties on FailedAt fall back to enqueue order — matching PostgresQuoteStore's
+            // "ORDER BY failed_at, queued_seq" rather than the unrelated order entries happened to fail in.
             return _state.Valuations
                 .Where(entry => entry.State == ValuationState.Failed)
+                .OrderBy(entry => entry.FailedAt)
                 .Skip(offset)
                 .Take(limit)
                 .ToList();
@@ -281,7 +324,8 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
     public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) =>
         TakeAsync(limit, entry => entry.State != ValuationState.Pending && !entry.Delivered, cancellationToken);
 
-    public async Task MarkValuationDeliveredAsync(string transactionHash, CancellationToken cancellationToken)
+    public async Task MarkValuationDeliveredAsync(
+        string transactionHash, ValuationState deliveredState, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(transactionHash);
 
@@ -290,7 +334,11 @@ public sealed class FileQuoteStore : IQuoteStore, IDisposable
         {
             int index = _state.Valuations.FindIndex(
                 v => string.Equals(v.TransactionHash, transactionHash, StringComparison.Ordinal));
-            if (index < 0)
+            // Only applies when the row is still in the state the caller actually handed to the host
+            // handler — otherwise an operator's resolution racing a slow delivery call for the stale
+            // content would be marked delivered on the resolution's behalf, and the resolution itself would
+            // never reach the host. Left alone here, the row stays undelivered for the next pass.
+            if (index < 0 || _state.Valuations[index].State != deliveredState)
             {
                 return;
             }

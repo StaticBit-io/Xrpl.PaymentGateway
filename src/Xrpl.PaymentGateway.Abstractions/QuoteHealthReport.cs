@@ -21,10 +21,13 @@ public sealed class QuoteHealthReport
     /// <summary>Message from the most recent failure, or null when nothing is failing.</summary>
     public string? LastError { get; init; }
 
-    /// <summary>Payments queued for valuation and not yet priced, capped at the batch size.</summary>
+    /// <summary>
+    /// Payments queued for valuation and not yet priced, across every pair — the true count, not a page
+    /// capped at the batch size.
+    /// </summary>
     public required int PendingValuations { get; init; }
 
-    /// <summary>Age of the oldest queued payment, or null when the queue is empty.</summary>
+    /// <summary>Age of the oldest queued payment across every pair, or null when the queue is empty.</summary>
     public TimeSpan? OldestPendingAge { get; init; }
 
     /// <summary>Valuations computed but not yet accepted by the host handler, capped at the batch size.</summary>
@@ -56,20 +59,6 @@ public sealed class QuoteHealthReport
     /// </summary>
     /// <remarks>False means pairs refresh slower than configured; add fewer pairs or a longer interval.</remarks>
     public required bool CycleFitsInInterval { get; init; }
-
-    /// <summary>
-    /// How long the collector's last full refresh cycle took — the cycle in progress right now if it has
-    /// already run longer than the last one that finished, otherwise the last completed cycle's duration.
-    /// Null before the collector's first cycle has started.
-    /// </summary>
-    /// <remarks>
-    /// <see cref="CycleFitsInInterval"/> only checks the spacing between pairs; it says nothing about how
-    /// long a capture itself runs, so it can read true while the real refresh period is several times
-    /// <c>RefreshInterval</c>. This is the measured number to compare against that setting instead — and
-    /// unlike a value written only when a cycle finishes, it keeps moving during a stalled one instead of
-    /// quietly repeating the last good number for as long as the stall lasts.
-    /// </remarks>
-    public TimeSpan? LastCycleDuration { get; init; }
 
     /// <summary>Whether the store could be read at all.</summary>
     public required bool StoreReadable { get; init; }

@@ -98,13 +98,14 @@ public sealed class PaymentValuation
     /// When this entry reached <see cref="ValuationState.Failed"/>. Null otherwise.
     /// </summary>
     /// <remarks>
-    /// Reached only for a per-entry, non-transient cause: the pair it names is no longer configured,
-    /// pricing it threw, the pair currently has no liquidity to price against, or the store rejected this
-    /// specific row on save. A missing or stale snapshot is neither — it is transient and shared by every
-    /// entry against that pair — so it never fails an entry; the entry simply stays
-    /// <see cref="ValuationState.Pending"/> until a snapshot arrives. There is deliberately no retry counter
-    /// or backoff behind this: a cause that terminates is, by definition, one another attempt cannot fix on
-    /// its own — an operator, through <see cref="IFailedValuationAdmin"/>, is what moves it on from here.
+    /// Reached only for a per-entry, non-transient cause: the pair it names is no longer configured, or
+    /// pricing it threw. Everything else that can keep an entry from being valued — no snapshot yet, a
+    /// stale one, the snapshot answering "no liquidity right now", or the store rejecting the write — is
+    /// transient and shared by every entry against that pair, so none of it fails an entry; the entry simply
+    /// stays <see cref="ValuationState.Pending"/> until conditions allow. There is deliberately no retry
+    /// counter or backoff behind this: a cause that terminates is, by definition, one another attempt cannot
+    /// fix on its own — an operator, through <see cref="IFailedValuationAdmin"/>, is what moves it on from
+    /// here.
     /// </remarks>
     public DateTimeOffset? FailedAt { get; init; }
 

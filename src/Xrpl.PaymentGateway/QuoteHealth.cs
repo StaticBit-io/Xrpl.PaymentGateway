@@ -94,13 +94,13 @@ internal sealed class QuoteHealth : IQuoteHealth
                 }
             }
 
-            IReadOnlyList<PaymentValuation> queued = await WithStoreTimeoutAsync(
-                    ct => _store.GetPendingValuationsAsync(_options.ValuationBatchSize, ct), cancellationToken)
+            IReadOnlyList<PendingValuationsByPair> pendingBreakdown = await WithStoreTimeoutAsync(
+                    _store.GetPendingValuationBreakdownAsync, cancellationToken)
                 .ConfigureAwait(false);
-            pending = queued.Count;
-            if (queued.Count > 0)
+            pending = pendingBreakdown.Sum(bucket => bucket.Count);
+            if (pendingBreakdown.Count > 0)
             {
-                oldestPendingAge = now - queued[0].EnqueuedAt;
+                oldestPendingAge = now - pendingBreakdown.Min(bucket => bucket.OldestEnqueuedAt);
             }
 
             IReadOnlyList<PaymentValuation> undeliveredEntries = await WithStoreTimeoutAsync(
@@ -144,27 +144,9 @@ internal sealed class QuoteHealth : IQuoteHealth
             FailedValuations = failedValuations,
             CycleFitsInInterval = QuoteSchedule.CycleFitsInInterval(
                 _registry.Pairs.Count, _options.RefreshInterval, _options.MinimumPairStagger),
-            LastCycleDuration = EffectiveLastCycleDuration(now),
             StoreReadable = storeReadable,
             PairsFailingToPersist = _registry.PairsFailingToPersist,
         };
-    }
-
-    /// <summary>
-    /// The last completed cycle's duration, or the cycle in progress right now when that has already run
-    /// longer — so this keeps moving during a stalled cycle instead of quietly repeating the last good
-    /// number for as long as the stall lasts, which is what a value written only on completion would do.
-    /// </summary>
-    private TimeSpan? EffectiveLastCycleDuration(DateTimeOffset now)
-    {
-        TimeSpan? completed = _registry.LastCycleDuration;
-        if (_registry.CycleStartedAt is not { } startedAt)
-        {
-            return completed;
-        }
-
-        TimeSpan inProgress = now - startedAt;
-        return completed is null || inProgress > completed ? inProgress : completed;
     }
 
     /// <summary>
