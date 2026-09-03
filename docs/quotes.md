@@ -46,6 +46,11 @@ More pairs than the interval can hold at the minimum stagger is allowed: the cyc
 longer than the interval rather than bunching up, and `CycleFitsInInterval` in the health
 report says so.
 
+Matched by currency and issuer alone means the receiving account's own address must never be the issuer
+of a pair it configures. If it is, a payment redeeming that token back to the issuer is reported with the
+sender as the issuer, not the account — a property of how the ledger's balance changes are attributed
+during a redemption — and the pair silently never matches it.
+
 ## Reading a quote
 
 ```csharp
