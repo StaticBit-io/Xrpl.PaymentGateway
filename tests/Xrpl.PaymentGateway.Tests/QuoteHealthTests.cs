@@ -169,6 +169,54 @@ public class QuoteHealthTests
     }
 
     [Fact]
+    public async Task APairRemovedFromConfigurationDoesNotPinTheReportUnhealthyForever()
+    {
+        // The failure row for a removed pair is never deleted; health must not keep naming an asset the
+        // gateway no longer prices just because its old row is still sitting in the store.
+        QuoteOptions options = new QuoteOptions
+        {
+            // Xpm is deliberately absent: the store still holds its failing row from before it was removed.
+            Pairs = new[] { new QuotePair("BAR", XpmIssuer, "USD", RlusdIssuer) },
+            RefreshInterval = TimeSpan.FromMinutes(1),
+        };
+        InMemoryQuoteStore store = new InMemoryQuoteStore();
+        await store.SaveQuoteAsync(Quote(failures: 5, error: "node unreachable"), Ct);
+        QuoteHealth health = new QuoteHealth(
+            Options.Create(options),
+            store,
+            new QuoteRegistry(options.Pairs),
+            new FixedTimeProvider(Now),
+            NullLogger<QuoteHealth>.Instance);
+
+        QuoteHealthReport report = await health.CheckAsync(Ct);
+
+        Assert.Equal(0, report.PairsFailing);
+        Assert.Equal(0, report.MaxConsecutiveFailures);
+        Assert.Null(report.LastError);
+    }
+
+    [Fact]
+    public async Task AStoreWhoseWritesFailIsNeverHealthyEvenThoughReadsStillWork()
+    {
+        // Everything QuoteHealth reads on its own — the store's rows, the in-memory snapshot — can look
+        // perfectly fresh while the collector's writes have been failing for hours: those fields describe
+        // captures and reads, not whether a persist attempt ever landed. StoreWritable, sourced from the
+        // registry the collector itself updates, is the only thing in the report actually derived from a
+        // write succeeding.
+        (QuoteHealth health, InMemoryQuoteStore store, QuoteRegistry registry) = Build();
+        await store.SaveQuoteAsync(Quote(), Ct);
+        registry.SetSnapshot(Xpm.Key, new StubQuoteSnapshot(capturedAt: Now.AddSeconds(-20)));
+        registry.SetLastWriteSucceeded(false);
+
+        QuoteHealthReport report = await health.CheckAsync(Ct);
+
+        Assert.True(report.StoreReadable);
+        Assert.Equal(1, report.PairsWithFreshQuote);
+        Assert.False(report.StoreWritable);
+        Assert.False(report.IsHealthy);
+    }
+
+    [Fact]
     public async Task AStoreThatCannotBeReadIsNeverHealthy()
     {
         QuoteOptions options = new QuoteOptions { Pairs = new[] { Xpm } };
@@ -198,6 +246,8 @@ public sealed class ThrowingQuoteStore : IQuoteStore
     public Task<bool> TryEnqueueValuationAsync(PaymentValuation pending, CancellationToken cancellationToken) => throw new IOException("down");
 
     public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken) => throw new IOException("down");
+
+    public Task MarkValuationAttemptedAsync(string transactionHash, DateTimeOffset attemptedAt, CancellationToken cancellationToken) => throw new IOException("down");
 
     public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken) => throw new IOException("down");
 

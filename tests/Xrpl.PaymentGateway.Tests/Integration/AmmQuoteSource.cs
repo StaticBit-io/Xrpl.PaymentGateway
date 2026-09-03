@@ -1,5 +1,6 @@
 using Xrpl.Client;
 using Xrpl.Models.Common;
+using Xrpl.Models.Ledger;
 using Xrpl.Models.Methods;
 using Xrpl.PaymentGateway.Abstractions;
 
@@ -25,6 +26,9 @@ public sealed class AmmQuoteSource : IQuoteSource
         {
             Asset = Asset(pair.Currency, pair.Issuer),
             Asset2 = Asset(pair.QuoteCurrency, pair.QuoteIssuer),
+            // Explicitly validated: left as the default ("current"), rippled answers from the in-progress
+            // ledger and reports it as ledger_current_index, not ledger_index — the field this reads.
+            LedgerIndex = new LedgerIndex(LedgerIndexType.Validated),
         }).Typed();
 
         if (info?.Amm is null)
@@ -34,11 +38,27 @@ public sealed class AmmQuoteSource : IQuoteSource
             return null;
         }
 
+        if (info.LedgerIndex is not { } responseLedgerIndex)
+        {
+            // Asking for the validated ledger above means rippled always answers with ledger_index; a
+            // response without one means the response shape changed under us, not that the pool is empty.
+            // Returning null here would be indistinguishable from "no pool" to the collector — a successful
+            // capture of an empty pair, clearing the cached snapshot and recording zero consecutive
+            // failures — when this is actually the "could not ask" case the type's own null contract
+            // reserves for a thrown exception. Throw instead, and let the collector record it as the
+            // failure it is.
+            throw new InvalidOperationException(
+                $"amm_info for {pair.Key} answered without a ledger_index; the response shape may have changed");
+        }
+
         decimal poolIn = PoolAmount(info.Amm.Amount);
         decimal poolOut = PoolAmount(info.Amm.Amount2);
         decimal fee = info.Amm.TradingFee / 100_000m;
 
-        uint ledgerIndex = await StandaloneFixture.CurrentValidatedLedgerAsync(_client);
+        // Stamped from the same amm_info response the pool amounts came from, rather than a second
+        // server_info call: a ledger can close between the two, and the second call's index could then be
+        // newer than the pool state it is supposed to label.
+        uint ledgerIndex = (uint)responseLedgerIndex;
 
         return poolIn <= 0m || poolOut <= 0m
             ? null

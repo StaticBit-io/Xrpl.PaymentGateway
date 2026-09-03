@@ -105,12 +105,12 @@ public class QuoteOptionsValidatorTests
     }
 
     [Fact]
-    public void ANonPositiveEnqueueTimeoutFails()
+    public void ANonPositiveStoreTimeoutFails()
     {
         QuoteOptions options = Valid();
-        options.EnqueueTimeout = TimeSpan.Zero;
+        options.StoreTimeout = TimeSpan.Zero;
 
-        Assert.Contains("EnqueueTimeout", Validate(options).FailureMessage, StringComparison.Ordinal);
+        Assert.Contains("StoreTimeout", Validate(options).FailureMessage, StringComparison.Ordinal);
     }
 
     [Fact]
