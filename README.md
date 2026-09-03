@@ -289,6 +289,12 @@ payment's currency and issuer are the configured `QuoteCurrency`/`QuoteIssuer`, 
 payment at its own amount, labelled as needing no conversion, instead of a row waiting forever for a
 valuation that was never going to arrive.
 
+A currency code longer than three characters has no short form on the ledger. RLUSD is
+`524C555344000000000000000000000000000000`, and that hex is what goes in `Currency` — `CurrencyKey` rejects
+a five-character code outright — and what the node reports back on every payment in it. The page decodes
+such a code to its name for display, so the asset still reads as `RLUSD` on the price line, on its pay
+button and on the payment row, while everything on the wire stays the code the ledger actually uses.
+
 The source behind the two priced pairs is `FixedRateQuoteSource`, a deliberate stand-in the sample ships
 with — fixed rates read straight from configuration, no network call at all. **Nothing about this prices
 anything real**; a real `IQuoteSource` reads liquidity off the ledger, and a real host brings its own

@@ -45,6 +45,43 @@ function formatDuration(timeSpan) {
     return `${seconds}s`;
 }
 
+/**
+ * A currency code as a person reads it. Three characters is all the ledger's short form holds, so anything
+ * longer — RLUSD, say — travels as forty hex characters, and that is what the node reports and what has to
+ * be configured. Printing it raw makes a page unreadable, so this decodes the name back out where the code
+ * is one of the two forms that carry an ASCII name, and leaves anything else exactly as it came.
+ */
+function displayCurrency(code) {
+    if (typeof code !== "string" || !/^[0-9a-fA-F]{40}$/.test(code)) {
+        return code;
+    }
+
+    const bytes = [];
+    for (let i = 0; i < 40; i += 2) {
+        bytes.push(parseInt(code.slice(i, i + 2), 16));
+    }
+
+    const zero = (from, to) => bytes.slice(from, to).every(byte => byte === 0);
+    const printable = (slice) => slice.length > 0 && slice.every(byte => byte >= 0x20 && byte <= 0x7e);
+    const text = (slice) => String.fromCharCode(...slice);
+
+    // All zeros is how XRP itself is written in this form, which the gateway canonicalizes the same way.
+    if (zero(0, 20)) {
+        return "XRP";
+    }
+
+    // The short form padded out to forty characters: twelve zero bytes, three of name, five zero bytes.
+    if (bytes[0] === 0) {
+        const name = bytes.slice(12, 15);
+        return zero(0, 12) && zero(15, 20) && printable(name) ? text(name).trim() : code;
+    }
+
+    // The long form: the name from the front, zero-padded to the end.
+    const end = bytes.indexOf(0);
+    const name = end === -1 ? bytes : bytes.slice(0, end);
+    return zero(name.length, 20) && printable(name) ? text(name) : code;
+}
+
 // ---------------------------------------------------------------------------- monitor strip
 
 /**
@@ -237,7 +274,8 @@ async function loadPrice(buyer) {
 
         // Every pair prices into the same asset, so the invoice total is stated once above the list rather
         // than repeated on each line.
-        el("pay-price-total").textContent = `${prices[0].quotePrice} ${prices[0].quoteCurrency}`;
+        el("pay-price-total").textContent =
+            `${prices[0].quotePrice} ${displayCurrency(prices[0].quoteCurrency)}`;
 
         const list = el("pay-price-list");
         list.replaceChildren();
@@ -246,7 +284,7 @@ async function loadPrice(buyer) {
 
             const amount = document.createElement("span");
             amount.className = "price-amount";
-            amount.textContent = `${price.inputAmount} ${price.currency}`;
+            amount.textContent = `${price.inputAmount} ${displayCurrency(price.currency)}`;
 
             const age = document.createElement("span");
             age.className = "hint";
@@ -317,8 +355,8 @@ function renderDemoAsset(buyer, asset, amount) {
 
     const code = document.createElement("code");
     code.className = "demo-asset-code";
-    code.textContent = asset.currency;
-    code.title = asset.issuer ? `issued by ${asset.issuer}` : "the ledger's native asset";
+    code.textContent = displayCurrency(asset.currency);
+    code.title = asset.issuer ? `${asset.currency} issued by ${asset.issuer}` : "the ledger's native asset";
 
     const input = document.createElement("input");
     input.type = "number";
@@ -464,7 +502,7 @@ function renderPayment(payment) {
 
     const amount = document.createElement("div");
     amount.className = "paid-amount";
-    amount.textContent = `${payment.value} ${payment.currency} received`;
+    amount.textContent = `${payment.value} ${displayCurrency(payment.currency)} received`;
 
     const meta = document.createElement("p");
     meta.className = "paid-meta";
@@ -490,7 +528,8 @@ function renderPayment(payment) {
         valuedShown.add(payment.transactionHash);
         const line = document.createElement("div");
         line.className = "valuation valued";
-        line.textContent = `worth ${payment.value} ${payment.currency} — already the quote asset, no conversion needed`;
+        line.textContent =
+            `worth ${payment.value} ${displayCurrency(payment.currency)} — already the quote asset, no conversion needed`;
         item.appendChild(line);
         return item;
     }
@@ -553,7 +592,8 @@ function renderValuation(valuation) {
     if (valuation.state === "Valued" || valuation.state === "ValuedManually") {
         line.className = "valuation valued";
         const manually = valuation.state === "ValuedManually" ? " — an operator's rate" : "";
-        line.textContent = `worth ${valuation.quoteAmount} ${valuation.readableQuoteCurrency ?? "?"}${manually}`;
+        const quoteCurrency = displayCurrency(valuation.readableQuoteCurrency ?? "?");
+        line.textContent = `worth ${valuation.quoteAmount} ${quoteCurrency}${manually}`;
     } else if (valuation.state === "WrittenOff") {
         line.className = "valuation written-off";
         line.textContent = `written off: ${valuation.writeOffReason ?? "no reason given"}`;
@@ -643,7 +683,7 @@ function renderUnresolved(entry) {
 
     const amount = document.createElement("div");
     amount.className = "unresolved-amount";
-    amount.textContent = `${entry.amount} ${entry.readableCurrency ?? "?"}`;
+    amount.textContent = `${entry.amount} ${displayCurrency(entry.readableCurrency ?? "?")}`;
 
     const meta = document.createElement("p");
     meta.className = "unresolved-meta";
