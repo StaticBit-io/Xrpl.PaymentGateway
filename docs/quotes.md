@@ -36,7 +36,7 @@ builder.Services.AddXrplPaymentQuotes(options =>
 | `MinimumPairStagger` | `TimeSpan` | 10 s | Floor on the gap between two pair refreshes. Pairs are spread evenly across the interval and never fired closer together than this. |
 | `MaxQuoteAge` | `TimeSpan?` | 3 × interval | How old a reading may be and still be served. Must not be shorter than the interval. |
 | `RefuseStaleQuotes` | `bool` | `true` | Whether a reading past that age is withheld rather than served with its age attached. |
-| `ValuateWithFreshSnapshot` | `bool` | `false` | Whether each payment gets its own capture. Costs one network round trip per payment, not per pair: a batch of pending payments that all price against the same pair still costs that many round trips per poll. |
+| `ValuateWithFreshSnapshot` | `bool` | `false` | Whether each payment gets its own capture. Costs one network round trip per payment, not per pair: a batch of pending payments that all price against the same pair still costs that many round trips per poll. Only spent when the pair actually has pending entries — a pair sitting idle between payments costs nothing here, fresh capture or not. |
 | `CaptureTimeout` | `TimeSpan` | 30 s | How long one capture may run before it is abandoned. A source that hangs must not stall the pairs behind it. |
 | `ValuationPollInterval` | `TimeSpan` | 5 s | How often the valuation queue is drained. |
 | `ValuationBatchSize` | `int` | 50 | How many queued valuations are priced, and how many delivered, per pass. |
@@ -102,14 +102,19 @@ transaction in the page can be looked at.
 
 ### The pending queue is per pair
 
-`ValuationWorker` prices each configured pair independently. For every pair it first decides,
-without asking the store anything, whether it can price at all this pass — a snapshot must
-exist and, when `RefuseStaleQuotes` is set, be fresh — and only then asks
-`IQuoteStore.GetPendingValuationsAsync` for that one pair's queued entries. A pair with a
-missing or stale snapshot is simply skipped for the pass: its own payments wait a little
-longer, and every other pair's payments are priced exactly as if the broken one did not
-exist. Nothing shares a queue across pairs, so nothing on one pair can bury payments on
-another behind it.
+`ValuationWorker` prices each configured pair independently. For every pair it first asks
+`IQuoteStore.GetPendingValuationsAsync` for that one pair's queued entries, and only spends
+anything on a snapshot — a cached one, or a fresh capture when `ValuateWithFreshSnapshot` is
+set — when there is something queued to price. A pair sitting idle between payments costs
+nothing here, not even a capture; a pair with something queued but a missing or stale
+snapshot is simply skipped for the pass: its own payments wait a little longer, and every
+other pair's payments are priced exactly as if the broken one did not exist. Nothing shares a
+queue across pairs, so nothing on one pair can bury payments on another behind it.
+
+With `ValuateWithFreshSnapshot` set, the capture itself happens once per pending entry, not
+once for the pair's whole batch: each entry gets its own network round trip and its own
+`SnapshotLedgerIndex`/`SnapshotCapturedAt`, matching what the option promises. Without it, one
+cached snapshot from the collector's own cycle prices every pending entry in the pass.
 
 ### The five states
 
@@ -122,24 +127,31 @@ one of these states — there is no "none".
   held one is past `MaxQuoteAge`, the snapshot answered that it currently has no liquidity to
   price this amount against, or the store rejected the write that would have moved the entry
   on. None of these is retried on a timer or counted against the entry; it simply prices
-  itself once conditions allow — a later snapshot, a later capture, a later store write.
+  itself once conditions allow — a later snapshot, a later capture, a later store write. A
+  `Pending` entry is not necessarily fresh, though: nothing here fails an entry just because
+  time has passed, so an entry can sit `Pending` indefinitely — see
+  [Unresolved valuations and the operator path](#unresolved-valuations-and-the-operator-path)
+  below for how an operator finds and acts on one that has.
 - **`Valued`** — priced automatically from a snapshot. The common case.
 - **`Failed`** — terminal. Reached only for a per-entry, non-transient cause: the pair was
   removed from configuration, or pricing it threw. Both are deterministic — another attempt
-  cannot change either outcome — which is exactly what does not fix itself on a retry, so the
-  entry leaves the pending queue for good and waits on an operator instead — see
-  [Failed valuations and the operator path](#failed-valuations-and-the-operator-path) below.
-  `PaymentValuation.FailureReason` says which cause it was, with the exception message where
-  the cause was one.
-- **`ValuedManually`** — an operator priced it, through `IFailedValuationAdmin`, at a rate
+  cannot change either outcome, which is exactly what distinguishes a `Failed` cause from
+  everything that leaves an entry `Pending`. `PaymentValuation.FailureReason` says which cause
+  it was, with the exception message where the cause was one. This library does not attempt
+  to classify a cause more finely than these two — a third category has been tried twice
+  before and been wrong both times — so `Failed` and `Pending` alike wait on the same operator
+  path below.
+- **`ValuedManually`** — an operator priced it, through `IUnresolvedValuationAdmin`, at a rate
   they supplied. Distinguishable from `Valued` by the state itself: no need for a separate
   flag to answer "why is this row this number".
-- **`WrittenOff`** — terminal. An operator looked at a `Failed` entry and decided it will
-  never be priced or credited — dust, a spam token, a mistaken transfer.
+- **`WrittenOff`** — terminal. An operator looked at a `Pending` or `Failed` entry and decided
+  it will never be priced or credited — dust, a spam token, a mistaken transfer.
 
 There is deliberately no retry counter, no backoff schedule, and no second queue behind any
 of this. A cause that reaches `Failed` is, by definition, one another automatic attempt
-cannot fix; the fix is an operator's decision, not a timer.
+cannot fix; a `Pending` entry that has simply sat too long is, by definition, one this library
+cannot tell apart from one about to clear itself. Either way the fix is an operator's
+decision, not a timer.
 
 Delivery is at least once, so `IPaymentValuedHandler` must be idempotent, and it hears about
 all four non-`Pending` states, not only a successfully priced one: a `Failed` or `WrittenOff`
@@ -166,13 +178,13 @@ itself. This is where the recovery above actually happens: the sweep is the mech
 side effect of it. That means a reconcile run costs one extra store round trip per payment in
 the window, on top of whatever the payment monitor itself already spends re-reading it.
 
-## Failed valuations and the operator path
+## Unresolved valuations and the operator path
 
-This library has no UI and never will. `IFailedValuationAdmin` is the operator path a host
-draws a screen on top of — list what needs attention, and act on one entry at a time:
+This library has no UI and never will. `IUnresolvedValuationAdmin` is the operator path a host
+draws a screen on top of — list what is unresolved and stuck, and act on one entry at a time:
 
 ```csharp
-FailedValuationPage page = await admin.ListFailedAsync(limit: 50, offset: 0, ct);
+UnresolvedValuationPage page = await admin.ListUnresolvedAsync(limit: 50, offset: 0, minAge: null, ct);
 
 // An operator found a real price some other way.
 await admin.ValueManuallyAsync(transactionHash, rate: 0.0123m, ct);
@@ -181,30 +193,43 @@ await admin.ValueManuallyAsync(transactionHash, rate: 0.0123m, ct);
 await admin.WriteOffAsync(transactionHash, "dust", ct);
 ```
 
-`ListFailedAsync` pages `Failed` entries only, oldest-failed first, with a `TotalCount` for
-pagination — a `WrittenOff` entry is settled and does not keep showing up here.
+`ListUnresolvedAsync` pages entries in `Pending` or `Failed` — not `Valued`,
+`ValuedManually` or `WrittenOff` — oldest-enqueued first, with a `TotalCount` for pagination.
+`Failed` is no longer the boundary: this library does not attempt to tell a transient cause
+apart from a permanent one beyond the two deterministic `Failed` causes it already recognizes
+(see [The five states](#the-five-states)), so a `Pending` entry that has simply sat too long
+is exactly as much an operator's problem as a `Failed` one, and both show up here together.
+
+`minAge` is what keeps this list from being every payment currently in flight: only entries
+whose `EnqueuedAt` is at least that old are included. Pass `null` for a sensible default (15
+minutes) or your own threshold — `TimeSpan.Zero` to see everything unresolved regardless of
+age.
 
 `ValueManuallyAsync` prices the entry's recorded amount at the supplied rate, moves it to
 `ValuedManually`, and clears `FailedAt`/`FailureReason` — resolved now, not failed and valued
-at once. Rejects a hash that is not currently `Failed`, and rejects a rate that is zero or
-negative.
+at once. Rejects a hash that is not currently `Pending` or `Failed`, and rejects a rate that is
+zero or negative.
 
 `WriteOffAsync` moves the entry to `WrittenOff` with no quote amount, recording the reason and
-the time. It keeps `FailedAt`/`FailureReason` from the original failure for the record,
-alongside the operator's own reason. Rejects a hash that is not currently `Failed` — writing
-off something that priced normally is a mistake, not a workflow.
+the time. When the entry was `Failed`, it keeps `FailedAt`/`FailureReason` from the original
+failure for the record, alongside the operator's own reason; a `Pending` entry written off
+directly simply has neither. Rejects a hash that is not currently `Pending` or `Failed` —
+writing off something that priced normally is a mistake, not a workflow.
 
 Neither operation delivers anything itself. Both leave the resolved row undelivered — even
-when the `Failed` row it replaces had already been delivered, since a manual price or a
-write-off is a new fact the host has not heard yet — exactly as `ValuationWorker` leaves a
-freshly computed automatic valuation the moment it is saved, so the same delivery pass that
-already retries a stuck automatic delivery is what hands this one to `IPaymentValuedHandler`
-too, within one `ValuationPollInterval` — one delivery mechanism, not a second one built for
-the operator path.
+when the row it replaces had already been delivered, since a manual price or a write-off is a
+new fact the host has not heard yet — exactly as `ValuationWorker` leaves a freshly computed
+automatic valuation the moment it is saved, so the same delivery pass that already retries a
+stuck automatic delivery is what hands this one to `IPaymentValuedHandler` too, within one
+`ValuationPollInterval` — one delivery mechanism, not a second one built for the operator path.
 
 Both operations also refuse to replace an entry that has already moved on some other way —
 two operators racing, one pricing and one writing off, cannot have one silently overwrite the
-other; whichever call lands first wins, and the other is a no-op.
+other. The store reports whether its guarded write actually applied, and both operations throw
+`InvalidOperationException` when it did not: the row the operator read and acted on had
+already moved on by the time the write reached the store, so the call must not report success
+over a decision made against a row that no longer exists in the state it was read in. Whichever
+call lands first wins; the other throws rather than silently doing nothing.
 
 What to tell the buyer, from `PaymentValuation.State` on the delivered valuation:
 
@@ -223,7 +248,7 @@ What to tell the buyer, from `PaymentValuation.State` on the delivered valuation
 | `PairsFailing` / `MaxConsecutiveFailures` / `LastError` | Refresh failures. A pair that keeps failing serves its last good reading until it expires. |
 | `PendingValuations` / `OldestPendingAge` | Queue depth waiting to be priced, and the age of the oldest entry — the true totals across every pair, from one store call (`IQuoteStore.GetPendingValuationBreakdownAsync`), not a page capped at `ValuationBatchSize`. A backlog is normal; a growing age is not. |
 | `UndeliveredValuations` / `OldestUndeliveredAge` | Past `Pending` — `Valued`, `ValuedManually`, `Failed` or `WrittenOff` — but not yet accepted by your handler, and how long the oldest of those has been waiting. A count alone saturates at `ValuationBatchSize` once delivery falls behind, so a handler that has stopped accepting valuations can look like a queue that is draining; the age is what does not lie, and what to alert on. |
-| `FailedValuations` | Entries in `Failed` right now — waiting on an operator through `IFailedValuationAdmin`. A written-off entry is settled and does not count here: this is the queue an operator still has open work in, not a running total of everything that ever failed. A backlog here is expected work, not a symptom of the pipeline being broken, but it should not be ignored. |
+| `FailedValuations` | Entries in `Failed` right now — the narrower of the two states `IUnresolvedValuationAdmin` pages through; a `Pending` entry stuck past what an operator would call reasonable does not show up in this count, only in `ListUnresolvedAsync` itself. A written-off entry is settled and does not count here either: this is not a running total of everything that ever failed. A backlog here is expected work, not a symptom of the pipeline being broken, but it should not be ignored. |
 | `CycleFitsInInterval` | False means pairs refresh slower than configured. This checks spacing only — the pauses between pairs — and knows nothing about how long a capture itself takes, so it can read true while the real cycle runs far longer than `RefreshInterval`. |
 | `StoreReadable` | Whether the store answered the last time the health report itself tried to read it. |
 | `PairsFailingToPersist` / `StoreWritable` | How many pairs' most recent attempt to persist a quote failed to reach the store, and that count being zero, spelled as a bool. Per pair, like every other count in this report: a store rejecting writes for two pairs out of three must not be erased by the third pair's next successful write, which a single process-wide flag would do. A store whose writes hang or throw while its reads keep answering would otherwise be invisible entirely: captures keep updating the in-memory snapshot every cycle, so every other field here would report healthy for as long as the process stays up, however long persistence has actually been broken. |
