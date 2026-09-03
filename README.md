@@ -255,26 +255,41 @@ Set `Xrpl:StorePath` to keep payments in a file instead of memory, and they surv
 
 ### Quotes and valuation in the sample
 
-Set `Xrpl:Quotes:Pairs` and the page grows a price at checkout, a valuation that appears on a payment row a
-few seconds after the payment itself, a quote health strip beside the monitor strip, and an "Unresolved
-payments" section for whatever the automatic pipeline could not price. Leave it empty, the shipped default,
-and the sample runs exactly as it does without the feature — `AddXrplPaymentQuotes` is never even called.
+The demo shop takes payment in three things, all valued in USD: XRP and one issued token (`GEM` below, a
+placeholder), each priced into USD through its own pair, and USD itself, accepted directly. Set
+`Xrpl:Quotes:QuoteCurrency`/`Xrpl:Quotes:QuoteIssuer` and `Xrpl:Quotes:Pairs` and the page grows a price at
+checkout, a valuation that appears on a payment row a few seconds after the payment itself, a quote health
+strip beside the monitor strip, and an "Unresolved payments" section for whatever the automatic pipeline
+could not price. Leave it empty, the shipped default, and the sample runs exactly as it does without the
+feature — `AddXrplPaymentQuotes` is never even called.
 
 ```json
 "Xrpl": {
   "Quotes": {
+    "QuoteCurrency": "USD",
+    "QuoteIssuer": "rUsdIssuerAddress",
     "Pairs": [
-      { "Currency": "XRP", "QuoteCurrency": "USD", "QuoteIssuer": "rIssuerAddress", "Rate": 0.55 }
+      { "Currency": "XRP", "Rate": 0.55 },
+      { "Currency": "GEM", "Issuer": "rGemIssuerAddress", "Rate": 1.10 }
     ],
     "RefusedCurrencies": []
   }
 }
 ```
 
-`Rate` is quote-asset units per unit of the received asset. The source behind this is
-`FixedRateQuoteSource`, a deliberate stand-in the sample ships with — fixed rates read straight from
-configuration, no network call at all. **Nothing about this prices anything real**; a real `IQuoteSource`
-reads liquidity off the ledger, and a real host brings its own pricing engine, the same way it brings its
-own `IPaymentStore`. `Xrpl:Quotes:RefusedCurrencies` names currencies that source throws for instead of
-pricing, which is what gives the unresolved queue and the settle/write-off buttons something genuine to
-act on in a demo that otherwise always prices cleanly.
+`Rate` is quote-asset units per unit of the received asset; every pair shares the one
+`QuoteCurrency`/`QuoteIssuer` above them, because the sample values everything a buyer can pay with in the
+one asset a real shop would price its catalog in. USD is the third accepted asset and deliberately has no
+entry in `Pairs`: `QuotePair` rejects quoting an asset against itself, so there is no USD/USD pair and
+cannot be one — a payment already in USD needs no conversion, and the library queues no valuation for it.
+The sample handles that itself rather than asking the library to: `SamplePaymentHandler` checks whether a
+payment's currency and issuer are the configured `QuoteCurrency`/`QuoteIssuer`, and the page shows such a
+payment at its own amount, labelled as needing no conversion, instead of a row waiting forever for a
+valuation that was never going to arrive.
+
+The source behind the two priced pairs is `FixedRateQuoteSource`, a deliberate stand-in the sample ships
+with — fixed rates read straight from configuration, no network call at all. **Nothing about this prices
+anything real**; a real `IQuoteSource` reads liquidity off the ledger, and a real host brings its own
+pricing engine, the same way it brings its own `IPaymentStore`. `Xrpl:Quotes:RefusedCurrencies` names
+currencies that source throws for instead of pricing, which is what gives the unresolved queue and the
+settle/write-off buttons something genuine to act on in a demo that otherwise always prices cleanly.

@@ -330,6 +330,18 @@ function renderPayment(payment) {
     meta.textContent = facts.join(" · ");
 
     item.append(amount, meta);
+
+    // Already the asset every pair prices into (USD in this sample): QuotePair refuses to quote an asset
+    // against itself, so there is no pair for it and the library queues no valuation for it. Shown at its
+    // own amount right away, rather than leaving the row waiting on a signal that will never arrive.
+    if (payment.isQuoteAsset) {
+        valuedShown.add(payment.transactionHash);
+        const line = document.createElement("div");
+        line.className = "valuation valued";
+        line.textContent = `worth ${payment.value} ${payment.currency} — already the quote asset, no conversion needed`;
+        item.appendChild(line);
+    }
+
     return item;
 }
 

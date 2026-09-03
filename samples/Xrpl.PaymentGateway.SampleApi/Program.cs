@@ -34,6 +34,12 @@ else
 builder.Services.AddSingleton(new CheckoutPresentation(
     builder.Configuration.GetValue<bool?>("Xrpl:IsTestNetwork") ?? true));
 
+// Read regardless of whether any pair is configured: SamplePaymentHandler asks it, for every payment,
+// whether that payment is already the asset valuations are expressed in — a question with a definite
+// answer (always "no") even when quotes are off entirely.
+QuoteConfiguration quoteConfiguration = QuoteConfiguration.FromConfiguration(builder.Configuration);
+builder.Services.AddSingleton(quoteConfiguration);
+
 builder.Services.AddSingleton<SamplePaymentHandler>();
 builder.Services.AddSingleton<IPaymentReceivedHandler>(services => services.GetRequiredService<SamplePaymentHandler>());
 
@@ -50,8 +56,6 @@ builder.Services.AddXrplPaymentGateway(options =>
 // Quotes are optional in the library, and stay optional here: with no pairs configured (the shipped
 // default), AddXrplPaymentQuotes is never called, so a host that ignores this section gets exactly what
 // it got before 1.1.0 — no new background service, no new network traffic.
-QuoteConfiguration quoteConfiguration = QuoteConfiguration.FromConfiguration(builder.Configuration);
-
 if (quoteConfiguration.IsEnabled)
 {
     // The quote store follows the same in-memory/file switch as the payment store, so the two halves of
@@ -87,8 +91,10 @@ IQuoteHealth? quoteHealth = app.Services.GetService<IQuoteHealth>();
 IUnresolvedValuationAdmin? unresolvedValuationAdmin = app.Services.GetService<IUnresolvedValuationAdmin>();
 SampleValuedHandler? valuedHandler = app.Services.GetService<SampleValuedHandler>();
 
-// What the sample's one fictional item costs, in the quote asset. A real host reads this from its own
-// catalog; a demo just needs one fixed number to ask ExactOutput about.
+// What the sample's one fictional item costs, in USD — the asset every accepted currency here prices
+// into. A real host reads this from its own catalog; a demo just needs one fixed number to ask
+// ExactOutput about. A buyer paying in USD itself needs none of this — see QuoteConfiguration.IsQuoteAsset,
+// which is what lets SamplePaymentHandler mark such a payment as already priced, at its own amount.
 const decimal DemoItemQuotePrice = 25m;
 
 // The checkout page. Plain files, no build step: `dotnet run` is the whole toolchain.

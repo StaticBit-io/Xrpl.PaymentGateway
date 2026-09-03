@@ -11,8 +11,13 @@ public sealed class SamplePaymentHandler : IPaymentReceivedHandler
 {
     private readonly ConcurrentQueue<DeliveredPayment> _delivered = new ConcurrentQueue<DeliveredPayment>();
     private readonly ILogger<SamplePaymentHandler> _logger;
+    private readonly QuoteConfiguration _quoteConfiguration;
 
-    public SamplePaymentHandler(ILogger<SamplePaymentHandler> logger) => _logger = logger;
+    public SamplePaymentHandler(ILogger<SamplePaymentHandler> logger, QuoteConfiguration quoteConfiguration)
+    {
+        _logger = logger;
+        _quoteConfiguration = quoteConfiguration;
+    }
 
     public IReadOnlyCollection<DeliveredPayment> Delivered => _delivered.ToArray();
 
@@ -27,6 +32,12 @@ public sealed class SamplePaymentHandler : IPaymentReceivedHandler
             payment.DestinationTag,
             payment.LedgerIndex);
 
+        // Already the asset every pair prices into (USD here): no pair exists for it — QuotePair rejects
+        // quoting an asset against itself — so no valuation is ever queued for it. That is the library
+        // behaving correctly, not a gap; the page uses this flag to show the payment at its own amount
+        // right away instead of waiting on a signal that will never arrive.
+        bool isQuoteAsset = _quoteConfiguration.IsQuoteAsset(payment.Currency, payment.Issuer);
+
         _delivered.Enqueue(new DeliveredPayment(
             payment.TransactionHash,
             buyerId,
@@ -36,7 +47,8 @@ public sealed class SamplePaymentHandler : IPaymentReceivedHandler
             payment.Issuer,
             payment.Value,
             payment.LedgerIndex,
-            payment.ProcessedAt));
+            payment.ProcessedAt,
+            isQuoteAsset));
 
         return Task.CompletedTask;
     }
@@ -52,4 +64,5 @@ public sealed record DeliveredPayment(
     string? Issuer,
     decimal Value,
     uint LedgerIndex,
-    DateTimeOffset ProcessedAt);
+    DateTimeOffset ProcessedAt,
+    bool IsQuoteAsset);
