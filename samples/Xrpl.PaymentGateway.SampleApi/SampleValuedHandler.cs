@@ -28,10 +28,12 @@ public sealed class SampleValuedHandler : IPaymentValuedHandler
 
         // Same value, automatically priced or an operator's own — both flow through this one handler, so
         // the page shows a resolved payment landing exactly the way an automatic valuation does.
+        // Note: The readable quote currency code is resolved on the API endpoint using the pair configuration.
         _valued.Enqueue(new ValuedPayment(
             valuation.TransactionHash,
             buyerId,
             valuation.PairKey,
+            null,
             valuation.State,
             valuation.Amount,
             valuation.QuoteAmount,
@@ -49,6 +51,7 @@ public sealed record ValuedPayment(
     string TransactionHash,
     string? BuyerId,
     string PairKey,
+    string? QuoteCurrency,
     ValuationState State,
     decimal Amount,
     decimal? QuoteAmount,

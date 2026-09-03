@@ -91,6 +91,15 @@ IQuoteHealth? quoteHealth = app.Services.GetService<IQuoteHealth>();
 IUnresolvedValuationAdmin? unresolvedValuationAdmin = app.Services.GetService<IUnresolvedValuationAdmin>();
 SampleValuedHandler? valuedHandler = app.Services.GetService<SampleValuedHandler>();
 
+// Maps from pair key to readable currency codes. Pairs are configured at startup, so these
+// mappings are stable for the lifetime of the application.
+Dictionary<string, (string Currency, string QuoteCurrency)> pairCurrenciesByKey =
+    new Dictionary<string, (string, string)>(StringComparer.Ordinal);
+foreach (QuotePair pair in quoteConfiguration.Pairs)
+{
+    pairCurrenciesByKey[pair.Key] = (pair.Currency, pair.QuoteCurrency);
+}
+
 // What the sample's one fictional item costs, in USD — the asset every accepted currency here prices
 // into. A real host reads this from its own catalog; a demo just needs one fixed number to ask
 // ExactOutput about. A buyer paying in USD itself needs none of this — see QuoteConfiguration.IsQuoteAsset,
@@ -201,11 +210,72 @@ app.MapGet("/api/checkout/{buyerId}/price", async (string buyerId, CancellationT
 // /api/checkout/{buyerId}/payments rather than one merged row: a payment is announced the moment it
 // arrives, and its valuation is a second, later signal — collapsing them into one row that shows up
 // already priced would hide the ordering the whole feature rests on.
-app.MapGet("/api/checkout/{buyerId}/valuations", (string buyerId) => Results.Ok(
-    valuedHandler?.Valued.Where(v => v.BuyerId == buyerId) ?? Enumerable.Empty<ValuedPayment>()));
+app.MapGet("/api/checkout/{buyerId}/valuations", (string buyerId) =>
+{
+    IEnumerable<ValuedPayment> valuations = valuedHandler?.Valued.Where(v => v.BuyerId == buyerId)
+        ?? Enumerable.Empty<ValuedPayment>();
+
+    // Add readable currency codes to each valuation for display
+    List<object> result = new List<object>();
+    foreach (ValuedPayment valuation in valuations)
+    {
+        string? quoteCurrency = valuation.QuoteCurrency;
+        if (pairCurrenciesByKey.TryGetValue(valuation.PairKey, out var currencies))
+        {
+            quoteCurrency = currencies.QuoteCurrency;
+        }
+
+        result.Add(new
+        {
+            valuation.TransactionHash,
+            valuation.BuyerId,
+            valuation.PairKey,
+            ReadableQuoteCurrency = quoteCurrency,
+            valuation.State,
+            valuation.Amount,
+            valuation.QuoteAmount,
+            valuation.EffectivePrice,
+            valuation.FailureReason,
+            valuation.WriteOffReason,
+            valuation.ResolvedAt,
+        });
+    }
+
+    return Results.Ok(result);
+});
 
 app.MapGet("/api/valuations", () =>
-    Results.Ok(valuedHandler?.Valued ?? (IReadOnlyCollection<ValuedPayment>)Array.Empty<ValuedPayment>()));
+{
+    IReadOnlyCollection<ValuedPayment> valuations = valuedHandler?.Valued
+        ?? (IReadOnlyCollection<ValuedPayment>)Array.Empty<ValuedPayment>();
+
+    List<object> result = new List<object>();
+    foreach (ValuedPayment valuation in valuations)
+    {
+        string? quoteCurrency = valuation.QuoteCurrency;
+        if (pairCurrenciesByKey.TryGetValue(valuation.PairKey, out var currencies))
+        {
+            quoteCurrency = currencies.QuoteCurrency;
+        }
+
+        result.Add(new
+        {
+            valuation.TransactionHash,
+            valuation.BuyerId,
+            valuation.PairKey,
+            ReadableQuoteCurrency = quoteCurrency,
+            valuation.State,
+            valuation.Amount,
+            valuation.QuoteAmount,
+            valuation.EffectivePrice,
+            valuation.FailureReason,
+            valuation.WriteOffReason,
+            valuation.ResolvedAt,
+        });
+    }
+
+    return Results.Ok(result);
+});
 
 app.MapGet("/api/quotes/health", async (CancellationToken cancellationToken) =>
 {
@@ -232,7 +302,37 @@ app.MapGet("/api/quotes/unresolved", async (int? limit, int? offset, Cancellatio
         .ListUnresolvedAsync(limit ?? 50, offset ?? 0, TimeSpan.Zero, cancellationToken)
         .ConfigureAwait(false);
 
-    return Results.Ok(page);
+    // Map valuations to include readable currency codes for display
+    List<object> items = new List<object>();
+    foreach (PaymentValuation valuation in page.Items)
+    {
+        string? readableCurrency = null;
+        string? readableQuoteCurrency = null;
+
+        if (pairCurrenciesByKey.TryGetValue(valuation.PairKey, out var currencies))
+        {
+            readableCurrency = currencies.Currency;
+            readableQuoteCurrency = currencies.QuoteCurrency;
+        }
+
+        items.Add(new
+        {
+            valuation.TransactionHash,
+            valuation.PairKey,
+            ReadableCurrency = readableCurrency,
+            ReadableQuoteCurrency = readableQuoteCurrency,
+            valuation.Amount,
+            valuation.State,
+            valuation.FailureReason,
+            valuation.EnqueuedAt,
+        });
+    }
+
+    return Results.Ok(new
+    {
+        Items = items,
+        page.TotalCount,
+    });
 });
 
 // An operator found a real price some other way. Runs through IUnresolvedValuationAdmin, which leaves the
