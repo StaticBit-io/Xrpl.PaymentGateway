@@ -66,6 +66,7 @@ internal sealed class QuoteCollector : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             DateTimeOffset cycleStarted = _timeProvider.GetUtcNow();
+            _registry.SetCycleStarted(cycleStarted);
 
             foreach (QuotePair pair in _registry.Pairs)
             {
@@ -198,7 +199,7 @@ internal sealed class QuoteCollector : BackgroundService
             // Recorded only once the write actually succeeded: a failure row that never reached the store
             // must not become the fallback the next read failure builds on top of.
             _lastWritten[quote.PairKey] = quote;
-            _registry.SetLastWriteSucceeded(true);
+            _registry.SetLastWriteSucceeded(quote.PairKey, succeeded: true);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
@@ -209,11 +210,12 @@ internal sealed class QuoteCollector : BackgroundService
             // The in-memory registry is already updated, so quoting keeps working; only the operator's
             // view of it is behind. Retrying here would stall the cycle for every other pair. Covers both
             // an outright store failure and the StoreTimeout above — a store that merely hangs must not
-            // stall the pairs behind it either. Recorded on the registry too: otherwise a store whose
-            // writes hang while its reads still answer would read as healthy forever, since the freshness
-            // fields come from the in-memory snapshot and update every cycle regardless of whether the
-            // write beneath them ever lands.
-            _registry.SetLastWriteSucceeded(false);
+            // stall the pairs behind it either. Recorded on the registry too, per pair: otherwise a store
+            // whose writes hang while its reads still answer would read as healthy forever, since the
+            // freshness fields come from the in-memory snapshot and update every cycle regardless of
+            // whether the write beneath them ever lands — and a single process-wide flag would let one
+            // pair's next successful write erase another pair's still-failing one.
+            _registry.SetLastWriteSucceeded(quote.PairKey, succeeded: false);
             _logger.LogError(ex, "persisting the quote for {Pair} failed", quote.PairKey);
         }
     }

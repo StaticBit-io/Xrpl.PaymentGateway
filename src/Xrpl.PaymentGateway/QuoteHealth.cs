@@ -67,6 +67,7 @@ internal sealed class QuoteHealth : IQuoteHealth
         TimeSpan? oldestPendingAge = null;
         int undelivered = 0;
         TimeSpan? oldestUndeliveredAge = null;
+        int failedValuations = 0;
         bool storeReadable = true;
 
         try
@@ -74,7 +75,8 @@ internal sealed class QuoteHealth : IQuoteHealth
             // Filtered to what is configured now, exactly as the freshness loop above already is: nothing
             // ever deletes a row, so a pair removed from configuration would otherwise pin IsHealthy false
             // forever over a failure that belongs to an asset the gateway no longer prices.
-            Dictionary<string, StoredQuote> quotesByPair = (await _store.GetQuotesAsync(cancellationToken).ConfigureAwait(false))
+            Dictionary<string, StoredQuote> quotesByPair = (await WithStoreTimeoutAsync(
+                    _store.GetQuotesAsync, cancellationToken).ConfigureAwait(false))
                 .ToDictionary(q => q.PairKey, StringComparer.Ordinal);
 
             foreach (QuotePair pair in _registry.Pairs)
@@ -92,8 +94,8 @@ internal sealed class QuoteHealth : IQuoteHealth
                 }
             }
 
-            IReadOnlyList<PaymentValuation> queued = await _store
-                .GetPendingValuationsAsync(_options.ValuationBatchSize, cancellationToken)
+            IReadOnlyList<PaymentValuation> queued = await WithStoreTimeoutAsync(
+                    ct => _store.GetPendingValuationsAsync(_options.ValuationBatchSize, ct), cancellationToken)
                 .ConfigureAwait(false);
             pending = queued.Count;
             if (queued.Count > 0)
@@ -101,14 +103,17 @@ internal sealed class QuoteHealth : IQuoteHealth
                 oldestPendingAge = now - queued[0].EnqueuedAt;
             }
 
-            IReadOnlyList<PaymentValuation> undeliveredEntries = await _store
-                .GetUndeliveredValuationsAsync(_options.ValuationBatchSize, cancellationToken)
+            IReadOnlyList<PaymentValuation> undeliveredEntries = await WithStoreTimeoutAsync(
+                    ct => _store.GetUndeliveredValuationsAsync(_options.ValuationBatchSize, ct), cancellationToken)
                 .ConfigureAwait(false);
             undelivered = undeliveredEntries.Count;
             if (undeliveredEntries.Count > 0)
             {
                 oldestUndeliveredAge = now - undeliveredEntries[0].EnqueuedAt;
             }
+
+            failedValuations = await WithStoreTimeoutAsync(_store.CountFailedValuationsAsync, cancellationToken)
+                .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -117,7 +122,8 @@ internal sealed class QuoteHealth : IQuoteHealth
         catch (Exception ex)
         {
             // A health check that could not read the store must not answer "healthy" on counts that
-            // defaulted to zero.
+            // defaulted to zero. Covers both an outright store failure and the per-call StoreTimeout above
+            // — a store that merely hangs must not make this check hang with it.
             storeReadable = false;
             lastError = ex.Message;
             _logger.LogError(ex, "reading the quote store for the health report failed");
@@ -135,11 +141,44 @@ internal sealed class QuoteHealth : IQuoteHealth
             OldestPendingAge = oldestPendingAge,
             UndeliveredValuations = undelivered,
             OldestUndeliveredAge = oldestUndeliveredAge,
+            FailedValuations = failedValuations,
             CycleFitsInInterval = QuoteSchedule.CycleFitsInInterval(
                 _registry.Pairs.Count, _options.RefreshInterval, _options.MinimumPairStagger),
-            LastCycleDuration = _registry.LastCycleDuration,
+            LastCycleDuration = EffectiveLastCycleDuration(now),
             StoreReadable = storeReadable,
-            StoreWritable = _registry.LastWriteSucceeded,
+            PairsFailingToPersist = _registry.PairsFailingToPersist,
         };
+    }
+
+    /// <summary>
+    /// The last completed cycle's duration, or the cycle in progress right now when that has already run
+    /// longer — so this keeps moving during a stalled cycle instead of quietly repeating the last good
+    /// number for as long as the stall lasts, which is what a value written only on completion would do.
+    /// </summary>
+    private TimeSpan? EffectiveLastCycleDuration(DateTimeOffset now)
+    {
+        TimeSpan? completed = _registry.LastCycleDuration;
+        if (_registry.CycleStartedAt is not { } startedAt)
+        {
+            return completed;
+        }
+
+        TimeSpan inProgress = now - startedAt;
+        return completed is null || inProgress > completed ? inProgress : completed;
+    }
+
+    /// <summary>
+    /// Bounds one call to <see cref="IQuoteStore"/> with <see cref="QuoteOptions.StoreTimeout"/>, exactly
+    /// as the collector's own reads and writes and <c>ValuationEnqueuer.EnqueueAsync</c> already are — a
+    /// health check is itself a path that must not hang just because the store it is reporting on has.
+    /// </summary>
+    private async Task<T> WithStoreTimeoutAsync<T>(
+        Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken)
+    {
+        using CancellationTokenSource timeoutCts = new CancellationTokenSource(_options.StoreTimeout, _timeProvider);
+        using CancellationTokenSource linked =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+
+        return await operation(linked.Token).ConfigureAwait(false);
     }
 }
