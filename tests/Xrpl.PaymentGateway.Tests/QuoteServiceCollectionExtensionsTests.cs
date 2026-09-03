@@ -44,7 +44,7 @@ public class QuoteServiceCollectionExtensionsTests
         Assert.Single(provider.GetServices<IHostedService>());
         Assert.Null(provider.GetService<IQuoteReader>());
         Assert.Null(provider.GetService<IQuoteHealth>());
-        Assert.Null(provider.GetService<IFailedValuationAdmin>());
+        Assert.Null(provider.GetService<IUnresolvedValuationAdmin>());
     }
 
     [Fact]
@@ -57,7 +57,7 @@ public class QuoteServiceCollectionExtensionsTests
         Assert.Equal(3, provider.GetServices<IHostedService>().Count());
         Assert.NotNull(provider.GetService<IQuoteReader>());
         Assert.NotNull(provider.GetService<IQuoteHealth>());
-        Assert.NotNull(provider.GetService<IFailedValuationAdmin>());
+        Assert.NotNull(provider.GetService<IUnresolvedValuationAdmin>());
     }
 
     [Fact]

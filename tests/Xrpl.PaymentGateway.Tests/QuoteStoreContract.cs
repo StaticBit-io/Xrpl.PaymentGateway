@@ -184,7 +184,7 @@ public abstract class QuoteStoreContract
         PaymentValuation pending = Pending("HASH1");
         await store.TryEnqueueValuationAsync(pending, Ct);
 
-        await store.SaveValuationAsync(Valued(pending, 9.9m), Ct);
+        Assert.True(await store.SaveValuationAsync(Valued(pending, 9.9m), Ct));
 
         Assert.Empty(await store.GetPendingValuationsAsync(PairKey, 10, Ct));
         IReadOnlyList<PaymentValuation> undelivered = await store.GetUndeliveredValuationsAsync(10, Ct);
@@ -200,7 +200,7 @@ public abstract class QuoteStoreContract
         await store.TryEnqueueValuationAsync(pending, Ct);
         await store.SaveValuationAsync(Valued(pending, 9.9m), Ct);
 
-        await store.MarkValuationDeliveredAsync("HASH1", ValuationState.Valued, Ct);
+        Assert.True(await store.MarkValuationDeliveredAsync("HASH1", ValuationState.Valued, Ct));
 
         Assert.Empty(await store.GetUndeliveredValuationsAsync(10, Ct));
         PaymentValuation? read = await store.GetValuationAsync("HASH1", Ct);
@@ -343,7 +343,7 @@ public abstract class QuoteStoreContract
         await store.SaveValuationFailureAsync("HASH1", "the pair currently has no liquidity", failedAt, Ct);
 
         DateTimeOffset writtenOffAt = new DateTimeOffset(2026, 8, 30, 12, 10, 0, TimeSpan.Zero);
-        await store.SaveWriteOffAsync("HASH1", "dust", writtenOffAt, Ct);
+        Assert.True(await store.SaveWriteOffAsync("HASH1", "dust", writtenOffAt, Ct));
 
         PaymentValuation? read = await store.GetValuationAsync("HASH1", Ct);
         Assert.NotNull(read);
@@ -358,20 +358,41 @@ public abstract class QuoteStoreContract
     }
 
     [Fact]
-    public async Task WritingOffSomethingThatIsNotFailedDoesNothing()
+    public async Task WritingOffSomethingThatIsNotUnresolvedDoesNothing()
     {
-        // Writing off something that priced normally is a mistake, not a workflow — only a Failed entry
-        // can be written off.
+        // Writing off something that priced normally is a mistake, not a workflow — only a Pending or
+        // Failed entry can be written off, and the store must say so honestly rather than reporting the
+        // write as applied.
         IQuoteStore store = await CreateAsync();
         PaymentValuation pending = Pending("HASH1");
         await store.TryEnqueueValuationAsync(pending, Ct);
         await store.SaveValuationAsync(Valued(pending, 9.9m), Ct);
 
-        await store.SaveWriteOffAsync("HASH1", "should not apply", DateTimeOffset.UtcNow, Ct);
+        Assert.False(await store.SaveWriteOffAsync("HASH1", "should not apply", DateTimeOffset.UtcNow, Ct));
 
         PaymentValuation? read = await store.GetValuationAsync("HASH1", Ct);
         Assert.NotNull(read);
         Assert.Equal(ValuationState.Valued, read.State);
+    }
+
+    [Fact]
+    public async Task WriteOffAppliesDirectlyToAStillPendingEntryWithoutGoingThroughFailedFirst()
+    {
+        // An operator can write off an entry the automatic pipeline has not given up on yet — Pending is
+        // unresolved too, not only Failed.
+        IQuoteStore store = await CreateAsync();
+        PaymentValuation pending = Pending("HASH1");
+        await store.TryEnqueueValuationAsync(pending, Ct);
+
+        DateTimeOffset writtenOffAt = new DateTimeOffset(2026, 8, 30, 12, 10, 0, TimeSpan.Zero);
+        Assert.True(await store.SaveWriteOffAsync("HASH1", "dust", writtenOffAt, Ct));
+
+        PaymentValuation? read = await store.GetValuationAsync("HASH1", Ct);
+        Assert.NotNull(read);
+        Assert.Equal(ValuationState.WrittenOff, read.State);
+        Assert.Null(read.FailedAt);
+        Assert.Null(read.FailureReason);
+        Assert.Empty(await store.GetPendingValuationsAsync(PairKey, 10, Ct));
     }
 
     [Fact]
@@ -382,7 +403,7 @@ public abstract class QuoteStoreContract
         await store.TryEnqueueValuationAsync(pending, Ct);
         await store.SaveValuationFailureAsync("HASH1", "the pair currently has no liquidity", DateTimeOffset.UtcNow, Ct);
 
-        await store.SaveValuationAsync(ValuedManually(pending, rate: 0.02m), Ct);
+        Assert.True(await store.SaveValuationAsync(ValuedManually(pending, rate: 0.02m), Ct));
 
         PaymentValuation? read = await store.GetValuationAsync("HASH1", Ct);
         Assert.NotNull(read);
@@ -445,7 +466,7 @@ public abstract class QuoteStoreContract
     {
         IQuoteStore store = await CreateAsync();
 
-        await store.MarkValuationDeliveredAsync("NOSUCHHASH", ValuationState.Valued, Ct);
+        Assert.False(await store.MarkValuationDeliveredAsync("NOSUCHHASH", ValuationState.Valued, Ct));
 
         Assert.Null(await store.GetValuationAsync("NOSUCHHASH", Ct));
     }
@@ -495,14 +516,40 @@ public abstract class QuoteStoreContract
         // The manual price is a new fact the host has not heard — it must come back undelivered so the
         // normal delivery pass picks it up, not sit forever behind a Delivered flag that describes stale
         // content.
+        //
+        // The replacement below is built by copying the delivered row just read back — the natural way to
+        // carry its other fields forward, and what a caller reasonably does — rather than a fresh object
+        // whose Delivered already defaults to false. A fresh object could never catch a store that merely
+        // stores whatever it is handed instead of clearing Delivered itself; copying a row that is actually
+        // Delivered = true is what forces the store to prove it enforces the clear.
         IQuoteStore store = await CreateAsync();
         PaymentValuation pending = Pending("HASH1");
         await store.TryEnqueueValuationAsync(pending, Ct);
         await store.SaveValuationFailureAsync("HASH1", "no liquidity", DateTimeOffset.UtcNow, Ct);
-        await store.MarkValuationDeliveredAsync("HASH1", ValuationState.Failed, Ct);
+        Assert.True(await store.MarkValuationDeliveredAsync("HASH1", ValuationState.Failed, Ct));
         Assert.Empty(await store.GetUndeliveredValuationsAsync(10, Ct));
 
-        await store.SaveValuationAsync(ValuedManually(pending, rate: 0.02m), Ct);
+        PaymentValuation? delivered = await store.GetValuationAsync("HASH1", Ct);
+        Assert.NotNull(delivered);
+        Assert.True(delivered!.Delivered);
+
+        PaymentValuation priced = new PaymentValuation
+        {
+            TransactionHash = delivered.TransactionHash,
+            PairKey = delivered.PairKey,
+            Amount = delivered.Amount,
+            PaymentLedgerIndex = delivered.PaymentLedgerIndex,
+            DestinationTag = delivered.DestinationTag,
+            EnqueuedAt = delivered.EnqueuedAt,
+            State = ValuationState.ValuedManually,
+            ValuedAt = new DateTimeOffset(2026, 8, 30, 12, 5, 0, TimeSpan.Zero),
+            QuoteAmount = delivered.Amount * 0.02m,
+            EffectivePrice = 0.02m,
+            FullyFilled = true,
+            Delivered = delivered.Delivered,
+        };
+
+        Assert.True(await store.SaveValuationAsync(priced, Ct));
 
         PaymentValuation? read = await store.GetValuationAsync("HASH1", Ct);
         Assert.NotNull(read);
@@ -521,10 +568,10 @@ public abstract class QuoteStoreContract
         PaymentValuation pending = Pending("HASH1");
         await store.TryEnqueueValuationAsync(pending, Ct);
         await store.SaveValuationFailureAsync("HASH1", "no liquidity", DateTimeOffset.UtcNow, Ct);
-        await store.MarkValuationDeliveredAsync("HASH1", ValuationState.Failed, Ct);
+        Assert.True(await store.MarkValuationDeliveredAsync("HASH1", ValuationState.Failed, Ct));
         Assert.Empty(await store.GetUndeliveredValuationsAsync(10, Ct));
 
-        await store.SaveWriteOffAsync("HASH1", "dust", DateTimeOffset.UtcNow, Ct);
+        Assert.True(await store.SaveWriteOffAsync("HASH1", "dust", DateTimeOffset.UtcNow, Ct));
 
         PaymentValuation? read = await store.GetValuationAsync("HASH1", Ct);
         Assert.NotNull(read);
@@ -535,19 +582,19 @@ public abstract class QuoteStoreContract
     }
 
     [Fact]
-    public async Task SavingAValuationOverAnEntryThatIsAlreadyResolvedDoesNothing()
+    public async Task SavingAValuationOverAnEntryThatIsAlreadyResolvedDoesNothingAndReportsItDidNotApply()
     {
         // Two operators racing — one pricing manually, one writing off — must not have one silently
         // overwrite the other. SaveValuationAsync only ever replaces a row still Pending or Failed; once a
-        // write-off has landed, a late-arriving manual price must find the row already moved on and leave
-        // it alone.
+        // write-off has landed, a late-arriving manual price must find the row already moved on, leave it
+        // alone, and report that honestly rather than as a success.
         IQuoteStore store = await CreateAsync();
         PaymentValuation pending = Pending("HASH1");
         await store.TryEnqueueValuationAsync(pending, Ct);
         await store.SaveValuationFailureAsync("HASH1", "no liquidity", DateTimeOffset.UtcNow, Ct);
         await store.SaveWriteOffAsync("HASH1", "dust", DateTimeOffset.UtcNow, Ct);
 
-        await store.SaveValuationAsync(ValuedManually(pending, rate: 0.02m), Ct);
+        Assert.False(await store.SaveValuationAsync(ValuedManually(pending, rate: 0.02m), Ct));
 
         PaymentValuation? read = await store.GetValuationAsync("HASH1", Ct);
         Assert.NotNull(read);
@@ -571,7 +618,7 @@ public abstract class QuoteStoreContract
         // The operator resolves the entry before the stale-state delivery mark below is applied.
         await store.SaveValuationAsync(ValuedManually(pending, rate: 0.02m), Ct);
 
-        await store.MarkValuationDeliveredAsync("HASH1", ValuationState.Failed, Ct);
+        Assert.False(await store.MarkValuationDeliveredAsync("HASH1", ValuationState.Failed, Ct));
 
         PaymentValuation? read = await store.GetValuationAsync("HASH1", Ct);
         Assert.NotNull(read);
@@ -665,5 +712,72 @@ public abstract class QuoteStoreContract
         PendingValuationsByPair otherPair = Assert.Single(breakdown, b => b.PairKey == OtherPairKey);
         Assert.Equal(1, otherPair.Count);
         Assert.Equal(new DateTimeOffset(2026, 8, 30, 12, 0, 3, TimeSpan.Zero), otherPair.OldestEnqueuedAt);
+    }
+
+    [Fact]
+    public async Task UnresolvedValuationsSpanPendingAndFailedButNotSettledStates()
+    {
+        IQuoteStore store = await CreateAsync();
+        DateTimeOffset cutoff = new DateTimeOffset(2026, 8, 30, 13, 0, 0, TimeSpan.Zero);
+
+        PaymentValuation stillPending = Pending("STILL-PENDING", enqueuedAt: cutoff.AddMinutes(-30));
+        await store.TryEnqueueValuationAsync(stillPending, Ct);
+
+        PaymentValuation failed = Pending("FAILED", enqueuedAt: cutoff.AddMinutes(-30));
+        await store.TryEnqueueValuationAsync(failed, Ct);
+        await store.SaveValuationFailureAsync("FAILED", "no liquidity", cutoff.AddMinutes(-20), Ct);
+
+        PaymentValuation valued = Pending("VALUED", enqueuedAt: cutoff.AddMinutes(-30));
+        await store.TryEnqueueValuationAsync(valued, Ct);
+        await store.SaveValuationAsync(Valued(valued, 1m), Ct);
+
+        PaymentValuation writtenOff = Pending("WRITTENOFF", enqueuedAt: cutoff.AddMinutes(-30));
+        await store.TryEnqueueValuationAsync(writtenOff, Ct);
+        await store.SaveValuationFailureAsync("WRITTENOFF", "no liquidity", cutoff.AddMinutes(-20), Ct);
+        await store.SaveWriteOffAsync("WRITTENOFF", "dust", cutoff.AddMinutes(-10), Ct);
+
+        IReadOnlyList<PaymentValuation> unresolved = await store.GetUnresolvedValuationsAsync(cutoff, 10, 0, Ct);
+
+        Assert.Equal(2, await store.CountUnresolvedValuationsAsync(cutoff, Ct));
+        Assert.Equal(
+            new[] { "STILL-PENDING", "FAILED" },
+            unresolved.Select(v => v.TransactionHash));
+    }
+
+    [Fact]
+    public async Task UnresolvedValuationsExcludeEntriesEnqueuedAfterTheCutoff()
+    {
+        // A payment still working through an ordinary transient wait must not be reported as stuck — only
+        // an entry old enough to have crossed the caller's minimum age counts.
+        IQuoteStore store = await CreateAsync();
+        DateTimeOffset cutoff = new DateTimeOffset(2026, 8, 30, 13, 0, 0, TimeSpan.Zero);
+
+        await store.TryEnqueueValuationAsync(Pending("STUCK", enqueuedAt: cutoff.AddMinutes(-1)), Ct);
+        await store.TryEnqueueValuationAsync(Pending("JUST-QUEUED", enqueuedAt: cutoff.AddMinutes(1)), Ct);
+
+        IReadOnlyList<PaymentValuation> unresolved = await store.GetUnresolvedValuationsAsync(cutoff, 10, 0, Ct);
+
+        Assert.Equal(new[] { "STUCK" }, unresolved.Select(v => v.TransactionHash));
+        Assert.Equal(1, await store.CountUnresolvedValuationsAsync(cutoff, Ct));
+    }
+
+    [Fact]
+    public async Task UnresolvedValuationsComeBackOldestEnqueuedFirstAndRespectPagination()
+    {
+        IQuoteStore store = await CreateAsync();
+        DateTimeOffset cutoff = new DateTimeOffset(2026, 8, 30, 13, 0, 0, TimeSpan.Zero);
+        for (int i = 1; i <= 5; i++)
+        {
+            await store.TryEnqueueValuationAsync(
+                Pending($"HASH{i}", enqueuedAt: cutoff.AddMinutes(-10 + i)), Ct);
+        }
+
+        Assert.Equal(5, await store.CountUnresolvedValuationsAsync(cutoff, Ct));
+
+        IReadOnlyList<PaymentValuation> firstPage = await store.GetUnresolvedValuationsAsync(cutoff, 2, 0, Ct);
+        Assert.Equal(new[] { "HASH1", "HASH2" }, firstPage.Select(v => v.TransactionHash));
+
+        IReadOnlyList<PaymentValuation> secondPage = await store.GetUnresolvedValuationsAsync(cutoff, 2, 2, Ct);
+        Assert.Equal(new[] { "HASH3", "HASH4" }, secondPage.Select(v => v.TransactionHash));
     }
 }

@@ -342,13 +342,13 @@ public sealed class ThrowingQuoteStore : IQuoteStore
     public Task<IReadOnlyList<PendingValuationsByPair>> GetPendingValuationBreakdownAsync(CancellationToken cancellationToken) =>
         throw new IOException("down");
 
-    public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken) => throw new IOException("down");
+    public Task<bool> SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken) => throw new IOException("down");
 
     public Task SaveValuationFailureAsync(
         string transactionHash, string reason, DateTimeOffset failedAt, CancellationToken cancellationToken) =>
         throw new IOException("down");
 
-    public Task SaveWriteOffAsync(
+    public Task<bool> SaveWriteOffAsync(
         string transactionHash, string reason, DateTimeOffset writtenOffAt, CancellationToken cancellationToken) =>
         throw new IOException("down");
 
@@ -357,9 +357,14 @@ public sealed class ThrowingQuoteStore : IQuoteStore
 
     public Task<int> CountFailedValuationsAsync(CancellationToken cancellationToken) => throw new IOException("down");
 
+    public Task<IReadOnlyList<PaymentValuation>> GetUnresolvedValuationsAsync(
+        DateTimeOffset olderThan, int limit, int offset, CancellationToken cancellationToken) => throw new IOException("down");
+
+    public Task<int> CountUnresolvedValuationsAsync(DateTimeOffset olderThan, CancellationToken cancellationToken) => throw new IOException("down");
+
     public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) => throw new IOException("down");
 
-    public Task MarkValuationDeliveredAsync(
+    public Task<bool> MarkValuationDeliveredAsync(
         string transactionHash, ValuationState deliveredState, CancellationToken cancellationToken) =>
         throw new IOException("down");
 

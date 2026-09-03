@@ -494,14 +494,14 @@ public sealed class OrderCheckingQuoteStore : IQuoteStore
     public Task<IReadOnlyList<PendingValuationsByPair>> GetPendingValuationBreakdownAsync(CancellationToken cancellationToken) =>
         _inner.GetPendingValuationBreakdownAsync(cancellationToken);
 
-    public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken) =>
+    public Task<bool> SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken) =>
         _inner.SaveValuationAsync(valuation, cancellationToken);
 
     public Task SaveValuationFailureAsync(
         string transactionHash, string reason, DateTimeOffset failedAt, CancellationToken cancellationToken) =>
         _inner.SaveValuationFailureAsync(transactionHash, reason, failedAt, cancellationToken);
 
-    public Task SaveWriteOffAsync(
+    public Task<bool> SaveWriteOffAsync(
         string transactionHash, string reason, DateTimeOffset writtenOffAt, CancellationToken cancellationToken) =>
         _inner.SaveWriteOffAsync(transactionHash, reason, writtenOffAt, cancellationToken);
 
@@ -512,10 +512,17 @@ public sealed class OrderCheckingQuoteStore : IQuoteStore
     public Task<int> CountFailedValuationsAsync(CancellationToken cancellationToken) =>
         _inner.CountFailedValuationsAsync(cancellationToken);
 
+    public Task<IReadOnlyList<PaymentValuation>> GetUnresolvedValuationsAsync(
+        DateTimeOffset olderThan, int limit, int offset, CancellationToken cancellationToken) =>
+        _inner.GetUnresolvedValuationsAsync(olderThan, limit, offset, cancellationToken);
+
+    public Task<int> CountUnresolvedValuationsAsync(DateTimeOffset olderThan, CancellationToken cancellationToken) =>
+        _inner.CountUnresolvedValuationsAsync(olderThan, cancellationToken);
+
     public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) =>
         _inner.GetUndeliveredValuationsAsync(limit, cancellationToken);
 
-    public Task MarkValuationDeliveredAsync(
+    public Task<bool> MarkValuationDeliveredAsync(
         string transactionHash, ValuationState deliveredState, CancellationToken cancellationToken) =>
         _inner.MarkValuationDeliveredAsync(transactionHash, deliveredState, cancellationToken);
 
