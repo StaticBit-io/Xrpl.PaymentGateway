@@ -38,6 +38,14 @@ internal static class AssetPrecision
     public static decimal RoundNearestForReport(decimal amount, string currency) =>
         Round(amount, currency, roundUp: false);
 
+    /// <summary>
+    /// What the demo payer can actually put on the ledger. Shares the report rule rather than the ask one:
+    /// the amount came from somebody who meant it, so the nearest expressible amount is the faithful
+    /// reading of it, where rounding up would quietly send more than was asked for.
+    /// </summary>
+    public static decimal RoundNearestForSending(decimal amount, string currency) =>
+        Round(amount, currency, roundUp: false);
+
     private static decimal Round(decimal amount, string currency, bool roundUp)
     {
         // CurrencyKey.Canonical is the same normalization the gateway itself uses to recognise XRP,

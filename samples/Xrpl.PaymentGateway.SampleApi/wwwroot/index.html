@@ -57,8 +57,8 @@
                  the half of the feature that happens before a payment exists at all. -->
             <div class="field" id="pay-price-field" hidden>
                 <span class="field-label">Priced at checkout</span>
-                <p class="price" id="pay-price"></p>
-                <p class="hint" id="pay-price-age"></p>
+                <p class="price" id="pay-price-total"></p>
+                <ul class="prices" id="pay-price-list"></ul>
             </div>
 
             <div class="field">
@@ -102,6 +102,20 @@
                         </p>
                     </div>
                 </div>
+            </div>
+
+            <!-- Only there when Xrpl:Demo:PayerSeed is configured: a wallet this sample holds the seed for,
+                 so the whole path can be driven from this page instead of from a second terminal. It is the
+                 shell snippet below, moved onto the page — no part of the library. -->
+            <div class="field" id="pay-demo-field" hidden>
+                <span class="field-label">Or pay from the demo wallet</span>
+                <p class="hint" id="pay-demo-payer"></p>
+                <ul class="demo-assets" id="demo-assets"></ul>
+                <p class="hint">
+                    Each button signs a payment from that wallet to the address and tag above. The page does
+                    not then know the payment happened &mdash; it hears about it from the gateway's monitor,
+                    a few seconds later, exactly like a payment sent from anywhere else.
+                </p>
             </div>
 
             <details class="cli">

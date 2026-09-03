@@ -35,6 +35,21 @@ public sealed class QuoteConfiguration
             ? CurrencyKey.Canonical(quoteCurrency)
             : null;
         _quoteIssuer = quoteIssuer;
+
+        List<AcceptedAsset> accepted = new List<AcceptedAsset>(pairs.Count + 1);
+        foreach (QuotePair pair in pairs)
+        {
+            accepted.Add(new AcceptedAsset(pair.Currency, pair.Issuer, false));
+        }
+
+        // The quote asset last, and only when there is a pair to quote into it: it has no pair of its own
+        // — QuotePair refuses to quote an asset against itself — so nothing above would have listed it.
+        if (pairs.Count > 0 && quoteCurrency is not null)
+        {
+            accepted.Add(new AcceptedAsset(quoteCurrency, quoteIssuer, true));
+        }
+
+        AcceptedAssets = accepted;
     }
 
     /// <summary>The configured pairs, ready for <see cref="QuoteOptions.Pairs"/>.</summary>
@@ -45,6 +60,13 @@ public sealed class QuoteConfiguration
 
     /// <summary>Currencies <see cref="FixedRateQuoteSource"/> refuses to price, by currency and issuer.</summary>
     public IReadOnlyCollection<(string Currency, string? Issuer)> RefusedCurrencies { get; }
+
+    /// <summary>
+    /// Every asset this sample can name: each pair's received asset, plus the asset they are all priced
+    /// into. Empty with quotes off — the gateway accepts whatever is sent to it either way, but with no
+    /// pairs configured the sample knows the name of none of it.
+    /// </summary>
+    public IReadOnlyList<AcceptedAsset> AcceptedAssets { get; }
 
     /// <summary>Whether any pair is configured. False leaves quoting entirely out of the wiring.</summary>
     public bool IsEnabled => Pairs.Count > 0;
@@ -118,3 +140,9 @@ public sealed class QuoteConfiguration
         public string? Issuer { get; set; }
     }
 }
+
+/// <summary>One asset the sample accepts, as the page and the demo payer need to see it.</summary>
+/// <param name="Currency">The currency code as configured — readable rather than hex, if that is how it was written.</param>
+/// <param name="Issuer">The issuing account, or null for XRP.</param>
+/// <param name="IsQuoteAsset">Whether this is the asset everything else is priced into, and so needs no pair.</param>
+public sealed record AcceptedAsset(string Currency, string? Issuer, bool IsQuoteAsset);

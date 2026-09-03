@@ -204,7 +204,7 @@ el("checkout-form").addEventListener("submit", async (event) => {
         el("waiting").hidden = false;
 
         startPollingPayments();
-        loadPrice(requested);
+        loadCheckoutPricing(requested);
     } catch (problem) {
         error.textContent = `Could not get instructions: ${problem.message}`;
         error.hidden = false;
@@ -214,27 +214,163 @@ el("checkout-form").addEventListener("submit", async (event) => {
 });
 
 /**
+ * The price panel and, under it, the demo wallet's buttons. Chained rather than run side by side: what a
+ * button offers to send is the amount the price panel just worked out, so the second needs the first.
+ */
+async function loadCheckoutPricing(buyer) {
+    const prices = await loadPrice(buyer);
+    await loadDemoAssets(buyer, prices);
+}
+
+/**
  * What this checkout is priced at, before any payment exists — ExactOutput against the demo item's fixed
- * quote price. Empty when no pair currently holds a usable reading (including every refused pair, which
- * never captures one), in which case the panel simply stays hidden rather than showing an empty price.
+ * quote price, one line per pair that holds a usable reading. Empty when none does (including every refused
+ * pair, which never captures one), in which case the panel stays hidden rather than showing an empty price.
  */
 async function loadPrice(buyer) {
     try {
         const prices = await (await fetch(`/api/checkout/${encodeURIComponent(buyer)}/price`)).json();
         if (prices.length === 0) {
             el("pay-price-field").hidden = true;
+            return [];
+        }
+
+        // Every pair prices into the same asset, so the invoice total is stated once above the list rather
+        // than repeated on each line.
+        el("pay-price-total").textContent = `${prices[0].quotePrice} ${prices[0].quoteCurrency}`;
+
+        const list = el("pay-price-list");
+        list.replaceChildren();
+        for (const price of prices) {
+            const item = document.createElement("li");
+
+            const amount = document.createElement("span");
+            amount.className = "price-amount";
+            amount.textContent = `${price.inputAmount} ${price.currency}`;
+
+            const age = document.createElement("span");
+            age.className = "hint";
+            age.textContent = `priced ${formatDuration(price.age)} ago at ledger ${price.ledgerIndex}`
+                + (price.isStale ? " — past the age limit, served anyway" : "");
+
+            item.append(amount, age);
+            list.appendChild(item);
+        }
+
+        el("pay-price-field").hidden = false;
+        return prices;
+    } catch {
+        el("pay-price-field").hidden = true;
+        return [];
+    }
+}
+
+// ---------------------------------------------------------------------------- paying from the demo wallet
+
+/**
+ * The demo wallet's buttons, one per asset the sample accepts. 404 means no seed is configured, which is
+ * the shipped default — the block stays hidden and the page waits for money sent from somewhere else.
+ */
+async function loadDemoAssets(buyer, prices) {
+    try {
+        const response = await fetch("/api/demo");
+        if (!response.ok) {
+            el("pay-demo-field").hidden = true;
             return;
         }
 
-        const price = prices[0];
-        el("pay-price").textContent =
-            `${price.quotePrice} ${price.quoteCurrency} ≈ ${price.inputAmount} ${price.currency}`;
-        el("pay-price-age").textContent =
-            `priced ${formatDuration(price.age)} ago at ledger ${price.ledgerIndex}`
-            + (price.isStale ? " — past the age limit, served anyway" : "");
-        el("pay-price-field").hidden = false;
+        const demo = await response.json();
+        el("pay-demo-payer").textContent = `paying from ${demo.payer}`;
+
+        const list = el("demo-assets");
+        list.replaceChildren();
+        for (const asset of demo.assets) {
+            list.appendChild(renderDemoAsset(buyer, asset, suggestedAmount(asset, prices)));
+        }
+
+        el("pay-demo-field").hidden = false;
     } catch {
-        el("pay-price-field").hidden = true;
+        el("pay-demo-field").hidden = true;
+    }
+}
+
+/**
+ * What to put in an asset's amount box. The priced assets get exactly what the panel above asks for; the
+ * quote asset gets the invoice total, since it needs no conversion; anything left — a pair with no usable
+ * reading, such as one this demo's source refuses — gets a round number to send, because the point of
+ * sending it is to watch it land unpriced.
+ */
+function suggestedAmount(asset, prices) {
+    if (asset.isQuoteAsset) {
+        return prices.length > 0 ? prices[0].quotePrice : 10;
+    }
+
+    const priced = prices.find(price =>
+        price.currency === asset.currency && (price.issuer ?? null) === (asset.issuer ?? null));
+
+    return priced ? priced.inputAmount : 10;
+}
+
+function renderDemoAsset(buyer, asset, amount) {
+    const item = document.createElement("li");
+    item.className = "demo-asset";
+
+    const code = document.createElement("code");
+    code.className = "demo-asset-code";
+    code.textContent = asset.currency;
+    code.title = asset.issuer ? `issued by ${asset.issuer}` : "the ledger's native asset";
+
+    const input = document.createElement("input");
+    input.type = "number";
+    input.step = "any";
+    input.min = "0";
+    input.value = amount;
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "send";
+
+    const status = document.createElement("span");
+    status.className = "demo-asset-status";
+
+    button.addEventListener("click", () => sendDemoPayment(buyer, asset, input, button, status));
+
+    item.append(code, input, button, status);
+    return item;
+}
+
+/**
+ * Submits one payment and reports only what the node made of the submission. Deliberately not a success
+ * message about the payment itself: the payment is not on the ledger yet, and the row that says it is
+ * arrives below, through the gateway, the same way it would for money sent from anywhere else.
+ */
+async function sendDemoPayment(buyer, asset, input, button, status) {
+    const amount = parseFloat(input.value);
+    if (!(amount > 0)) {
+        status.textContent = "enter an amount";
+        return;
+    }
+
+    button.disabled = true;
+    status.textContent = "submitting…";
+
+    try {
+        const response = await fetch(`/api/checkout/${encodeURIComponent(buyer)}/pay`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ currency: asset.currency, issuer: asset.issuer, amount }),
+        });
+
+        const result = await response.json().catch(() => null);
+        if (response.ok) {
+            status.textContent = `submitted — waiting for the ledger`;
+        } else {
+            status.textContent = result?.engineResult ?? result?.message ?? `failed (${response.status})`;
+        }
+    } catch {
+        status.textContent = "request failed";
+    } finally {
+        button.disabled = false;
     }
 }
 

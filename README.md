@@ -250,6 +250,8 @@ already exists and is funded. For anything else, point it at your own receiving 
 | `GET /api/quotes/unresolved` | Payments the automatic pipeline has not resolved, for an operator to act on |
 | `POST /api/quotes/unresolved/{transactionHash}/settle` | Price one unresolved payment by hand, at a rate supplied in the body |
 | `POST /api/quotes/unresolved/{transactionHash}/write-off` | Close one unresolved payment with no quote amount, recording why |
+| `GET /api/demo` | The demo wallet's address and the assets it may be asked to send. 404 when no demo seed is configured |
+| `POST /api/checkout/{buyerId}/pay` | Pay this checkout from the demo wallet. 404 when no demo seed is configured |
 
 Set `Xrpl:StorePath` to keep payments in a file instead of memory, and they survive a restart.
 
@@ -293,3 +295,31 @@ anything real**; a real `IQuoteSource` reads liquidity off the ledger, and a rea
 pricing engine, the same way it brings its own `IPaymentStore`. `Xrpl:Quotes:RefusedCurrencies` names
 currencies that source throws for instead of pricing, which is what gives the unresolved queue and the
 settle/write-off buttons something genuine to act on in a demo that otherwise always prices cleanly.
+
+### Paying from the page
+
+Set `Xrpl:Demo:PayerSeed` to the seed of a funded account on the same network and the "Send the payment"
+step grows a row per accepted asset — an amount, prefilled with what the checkout asks for, and a button
+that signs the payment and submits it. It is the shell snippet the page already prints, moved onto the
+page, so a full demonstration needs one terminal instead of two.
+
+```json
+"Xrpl": {
+  "Demo": {
+    "PayerSeed": "sXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+  }
+}
+```
+
+Leave it empty, the shipped default, and neither the endpoints nor the buttons exist — the page waits for
+money sent from somewhere else, exactly as before.
+
+**A seed in configuration is a private key in a text file.** Use it against a standalone stand or a test
+network and nothing else. The endpoint is narrow on purpose — it can only pay the address and destination
+tag the gateway itself just issued for the buyer being checked out, in an asset the sample is configured to
+accept, and the caller names neither — but that narrowness protects the *destination*, not the seed.
+
+To pay in an issued currency, the demo payer needs a trust line to its issuer and a balance on it, and the
+receiving account needs a trust line for the same currency, or the payment is rejected by the ledger before
+the gateway ever sees it. On a standalone stand that means creating an issuer, enabling `DefaultRipple` on
+it so its token can move between two holders, opening the trust lines, and funding the payer.
