@@ -42,19 +42,32 @@ public sealed class QuoteHealthReport
     public TimeSpan? OldestUndeliveredAge { get; init; }
 
     /// <summary>
+    /// Entries in <c>ValuationState.Failed</c> right now — the automatic pipeline gave up on them and they
+    /// wait on an operator through <c>IFailedValuationAdmin</c>.
+    /// </summary>
+    /// <remarks>
+    /// A written-off entry is settled and does not count here: this is the queue an operator still has open
+    /// work in, not a running total of everything that ever failed.
+    /// </remarks>
+    public required int FailedValuations { get; init; }
+
+    /// <summary>
     /// Whether a full refresh cycle fits inside the configured interval.
     /// </summary>
     /// <remarks>False means pairs refresh slower than configured; add fewer pairs or a longer interval.</remarks>
     public required bool CycleFitsInInterval { get; init; }
 
     /// <summary>
-    /// How long the collector's last full refresh cycle actually took, or null before the first one
-    /// completes.
+    /// How long the collector's last full refresh cycle took — the cycle in progress right now if it has
+    /// already run longer than the last one that finished, otherwise the last completed cycle's duration.
+    /// Null before the collector's first cycle has started.
     /// </summary>
     /// <remarks>
     /// <see cref="CycleFitsInInterval"/> only checks the spacing between pairs; it says nothing about how
     /// long a capture itself runs, so it can read true while the real refresh period is several times
-    /// <c>RefreshInterval</c>. This is the measured number to compare against that setting instead.
+    /// <c>RefreshInterval</c>. This is the measured number to compare against that setting instead — and
+    /// unlike a value written only when a cycle finishes, it keeps moving during a stalled one instead of
+    /// quietly repeating the last good number for as long as the stall lasts.
     /// </remarks>
     public TimeSpan? LastCycleDuration { get; init; }
 
@@ -62,26 +75,31 @@ public sealed class QuoteHealthReport
     public required bool StoreReadable { get; init; }
 
     /// <summary>
-    /// Whether the collector's most recent attempt to persist a quote actually reached the store.
+    /// How many pairs' most recent attempt to persist a quote failed to reach the store, right now.
     /// </summary>
     /// <remarks>
     /// Reads and writes can fail independently: a store whose writes hang or throw while its reads keep
     /// answering would otherwise be invisible here, because <see cref="PairsWithFreshQuote"/> and
     /// <see cref="PairsFailing"/> come from the collector's in-memory snapshot and its own cached last
     /// write, both of which keep looking current every cycle regardless of whether the write beneath them
-    /// ever lands. This flag is the one thing in the report that is actually derived from a write
-    /// succeeding.
+    /// ever lands. Per pair, like every other count in this report — a store rejecting writes for two pairs
+    /// out of three must not be erased by the third pair's next successful write.
     /// </remarks>
-    public required bool StoreWritable { get; init; }
+    public required int PairsFailingToPersist { get; init; }
+
+    /// <summary><see cref="PairsFailingToPersist"/> being zero, spelled as a bool.</summary>
+    public bool StoreWritable => PairsFailingToPersist == 0;
 
     /// <summary>
     /// True only when every pair holds a fresh reading, nothing is failing, and the store both answered
-    /// and accepted the collector's last write.
+    /// and accepted every pair's last write.
     /// </summary>
     /// <remarks>
     /// <para>
     /// A queue with work in it is not unhealthy: valuations are expected to lag by design. A queue that
     /// stops draining shows up as a growing <see cref="OldestPendingAge"/>, which is the number to alert on.
+    /// A backlog of <see cref="FailedValuations"/> is not itself unhealthy either — it is expected work for
+    /// an operator, not a symptom of the pipeline being broken — but it should not be ignored.
     /// </para>
     /// <para>
     /// A pair with genuinely no liquidity also reads as unhealthy: the collector correctly clears its
