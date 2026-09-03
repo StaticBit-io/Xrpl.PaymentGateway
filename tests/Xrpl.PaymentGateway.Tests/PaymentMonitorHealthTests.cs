@@ -13,7 +13,7 @@ public class PaymentMonitorHealthTests
 
     private sealed class Harness
     {
-        public Harness(Action<PaymentGatewayOptions>? configure = null)
+        public Harness(Action<PaymentGatewayOptions>? configure = null, ValuationEnqueuer? valuationEnqueuer = null)
         {
             Scripted = new ScriptedPaymentStore(Store);
             Options = new PaymentGatewayOptions
@@ -31,7 +31,8 @@ public class PaymentMonitorHealthTests
                 Snapshot,
                 Factory,
                 NullLogger<PaymentMonitorHealth>.Instance,
-                TimeProvider.System);
+                TimeProvider.System,
+                valuationEnqueuer);
         }
 
         public PaymentGatewayOptions Options { get; }
@@ -153,6 +154,53 @@ public class PaymentMonitorHealthTests
     }
 
     [Fact]
+    public async Task TheSweepOffersAnAlreadyStoredPaymentForValuationRegardless()
+    {
+        // This is where the "reconciliation re-offers it" recovery for a lost valuation was always meant
+        // to live — not on the record path, which must stay cheap for the ordinary case of an
+        // already-stored payment during catch-up. The sweep offers every payment it re-reads to the quote
+        // store, new or not; the store rejects the duplicate on its own.
+        QuotePair pair = new QuotePair("XRP", null, "USD", "rUsdIssuerxxxxxxxxxxxxxxxxxxxxxxxx");
+        CountingQuoteStore quoteStore = new CountingQuoteStore();
+        ValuationEnqueuer enqueuer = new ValuationEnqueuer(
+            Microsoft.Extensions.Options.Options.Create(new QuoteOptions { Pairs = new[] { pair } }),
+            quoteStore,
+            new QuoteRegistry(new[] { pair }),
+            TimeProvider.System,
+            NullLogger.Instance);
+        Harness harness = new Harness(valuationEnqueuer: enqueuer);
+        harness.Snapshot.SetCursor(200);
+        FakeXrplNodeConnection connection = harness.Factory.For(Node);
+        connection.Status = new NodeStatus { ServerState = "full", ValidatedLedgerIndex = 200, CompleteLedgers = "1-200" };
+        connection.EnqueuePage(new AccountTransactionPage
+        {
+            Transactions = new[] { TransactionFixtures.Parse(TransactionFixtures.XrpPayment) },
+            Marker = null,
+            LedgerIndexMin = 100,
+            LedgerIndexMax = 200,
+        });
+
+        ReconciliationResult first = await harness.Health.ReconcileAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(1, first.RecoveredCount);
+        Assert.Equal(1, quoteStore.EnqueueAttempts);
+
+        // Second sweep: the payment is already stored this time, so RecoveredCount is 0 — but the quote
+        // store must still be offered the payment, which is the whole point of the sweep for valuation.
+        connection.EnqueuePage(new AccountTransactionPage
+        {
+            Transactions = new[] { TransactionFixtures.Parse(TransactionFixtures.XrpPayment) },
+            Marker = null,
+            LedgerIndexMin = 100,
+            LedgerIndexMax = 200,
+        });
+
+        ReconciliationResult second = await harness.Health.ReconcileAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, second.RecoveredCount);
+        Assert.Equal(2, quoteStore.EnqueueAttempts);
+    }
+
+    [Fact]
     public async Task ASweepThatFindsNothingMissingRecoversNothing()
     {
         Harness harness = new Harness();
@@ -268,4 +316,47 @@ public class PaymentMonitorHealthTests
         Assert.Empty(connection.Queries);
         Assert.Equal(0, result.RecoveredCount);
     }
+}
+
+/// <summary>An <see cref="IQuoteStore"/> that counts every <see cref="TryEnqueueValuationAsync"/> call,
+/// whatever it returns, so a test can tell an offer was made even when the store itself rejects it as a
+/// duplicate. Everything else delegates to a real <see cref="InMemoryQuoteStore"/>.</summary>
+public sealed class CountingQuoteStore : IQuoteStore
+{
+    private readonly InMemoryQuoteStore _inner = new InMemoryQuoteStore();
+
+    public int EnqueueAttempts { get; private set; }
+
+    public Task SaveQuoteAsync(StoredQuote quote, CancellationToken cancellationToken) =>
+        _inner.SaveQuoteAsync(quote, cancellationToken);
+
+    public Task<StoredQuote?> GetQuoteAsync(string pairKey, CancellationToken cancellationToken) =>
+        _inner.GetQuoteAsync(pairKey, cancellationToken);
+
+    public Task<IReadOnlyList<StoredQuote>> GetQuotesAsync(CancellationToken cancellationToken) =>
+        _inner.GetQuotesAsync(cancellationToken);
+
+    public Task<bool> TryEnqueueValuationAsync(PaymentValuation pending, CancellationToken cancellationToken)
+    {
+        EnqueueAttempts++;
+        return _inner.TryEnqueueValuationAsync(pending, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken) =>
+        _inner.GetPendingValuationsAsync(limit, cancellationToken);
+
+    public Task MarkValuationAttemptedAsync(string transactionHash, DateTimeOffset attemptedAt, CancellationToken cancellationToken) =>
+        _inner.MarkValuationAttemptedAsync(transactionHash, attemptedAt, cancellationToken);
+
+    public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken) =>
+        _inner.SaveValuationAsync(valuation, cancellationToken);
+
+    public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) =>
+        _inner.GetUndeliveredValuationsAsync(limit, cancellationToken);
+
+    public Task MarkValuationDeliveredAsync(string transactionHash, CancellationToken cancellationToken) =>
+        _inner.MarkValuationDeliveredAsync(transactionHash, cancellationToken);
+
+    public Task<PaymentValuation?> GetValuationAsync(string transactionHash, CancellationToken cancellationToken) =>
+        _inner.GetValuationAsync(transactionHash, cancellationToken);
 }

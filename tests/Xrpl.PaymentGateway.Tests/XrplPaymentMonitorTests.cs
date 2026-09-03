@@ -14,7 +14,11 @@ public class XrplPaymentMonitorTests
 
     private sealed class Harness : IAsyncDisposable
     {
-        public Harness(Action<PaymentGatewayOptions>? configure = null, uint firstDestinationTag = 1)
+        public Harness(
+            Action<PaymentGatewayOptions>? configure = null,
+            uint firstDestinationTag = 1,
+            ValuationEnqueuer? valuationEnqueuer = null,
+            RecordingHandler? handler = null)
         {
             Store = new InMemoryPaymentStore(firstDestinationTag);
             Options = new PaymentGatewayOptions
@@ -29,6 +33,7 @@ public class XrplPaymentMonitorTests
             };
             configure?.Invoke(Options);
 
+            Handler = handler ?? new RecordingHandler();
             Snapshot = new MonitorSnapshot();
             Monitor = new XrplPaymentMonitor(
                 Microsoft.Extensions.Options.Options.Create(Options),
@@ -37,7 +42,8 @@ public class XrplPaymentMonitorTests
                 Handler,
                 Snapshot,
                 TimeProvider.System,
-                NullLogger<XrplPaymentMonitor>.Instance);
+                NullLogger<XrplPaymentMonitor>.Instance,
+                valuationEnqueuer);
         }
 
         public PaymentGatewayOptions Options { get; }
@@ -46,7 +52,7 @@ public class XrplPaymentMonitorTests
 
         public InMemoryPaymentStore Store { get; }
 
-        public RecordingHandler Handler { get; } = new RecordingHandler();
+        public RecordingHandler Handler { get; }
 
         public MonitorSnapshot Snapshot { get; }
 
@@ -177,6 +183,75 @@ public class XrplPaymentMonitorTests
         Assert.Equal(1m, harness.Handler.Deliveries[0].Payment.Value);
         Assert.Equal("buyer-42", harness.Handler.Deliveries[0].BuyerId);
         Assert.Empty(await harness.Store.GetUnhandledPaymentsAsync(10, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task TheReceiptHandlerIsCalledBeforeTheValuationIsQueued()
+    {
+        // The valuation must never be queued ahead of, or even alongside a race with, the receipt
+        // handler: IPaymentValuedHandler documents that ordering, and queueing on the record path used to
+        // violate it. The quote store here checks, at the moment it is asked to enqueue, whether the
+        // handler has already recorded a delivery.
+        QuotePair pair = new QuotePair("XRP", null, "USD", "rUsdIssuerxxxxxxxxxxxxxxxxxxxxxxxx");
+        RecordingHandler handler = new RecordingHandler();
+        OrderCheckingQuoteStore quoteStore = new OrderCheckingQuoteStore(() => handler.Deliveries.Count);
+        ValuationEnqueuer enqueuer = new ValuationEnqueuer(
+            Microsoft.Extensions.Options.Options.Create(new QuoteOptions { Pairs = new[] { pair } }),
+            quoteStore,
+            new QuoteRegistry(new[] { pair }),
+            TimeProvider.System,
+            NullLogger.Instance);
+        await using Harness harness = new Harness(valuationEnqueuer: enqueuer, handler: handler);
+        FakeXrplNodeConnection node = harness.Factory.For(NodeA);
+        node.Status = new NodeStatus { ServerState = "full", ValidatedLedgerIndex = 90, CompleteLedgers = "1-90" };
+        await harness.StartAsync();
+        await TestWait.UntilAsync(
+            () => harness.Snapshot.Read().State == PaymentMonitorState.Streaming, "the monitor to start streaming");
+
+        await node.PushTransactionAsync(TransactionFixtures.Parse(TransactionFixtures.XrpPayment));
+
+        await TestWait.UntilAsync(() => quoteStore.EnqueueCalls >= 1, "the valuation to be queued");
+
+        Assert.Single(handler.Deliveries);
+        Assert.True(quoteStore.HandlerHadAlreadyRunAtEnqueueTime);
+    }
+
+    [Fact]
+    public async Task AReplayedPaymentSkipsTheEnqueuerButAGenuinelyNewOneReachesIt()
+    {
+        // ProcessTransactionAsync returns before DeliverAsync or EnqueueAsync run at all once
+        // RecordAsync reports the payment as already stored — a replay must cost the quote store
+        // nothing. Pushing the same transaction twice, then a genuinely different one, pins both halves:
+        // the enqueue count must not move for the replay and must move for the new arrival.
+        QuotePair pair = new QuotePair("XRP", null, "USD", "rUsdIssuerxxxxxxxxxxxxxxxxxxxxxxxx");
+        RecordingHandler handler = new RecordingHandler();
+        OrderCheckingQuoteStore quoteStore = new OrderCheckingQuoteStore(() => handler.Deliveries.Count);
+        ValuationEnqueuer enqueuer = new ValuationEnqueuer(
+            Microsoft.Extensions.Options.Options.Create(new QuoteOptions { Pairs = new[] { pair } }),
+            quoteStore,
+            new QuoteRegistry(new[] { pair }),
+            TimeProvider.System,
+            NullLogger.Instance);
+        await using Harness harness = new Harness(valuationEnqueuer: enqueuer, handler: handler);
+        FakeXrplNodeConnection node = harness.Factory.For(NodeA);
+        node.Status = new NodeStatus { ServerState = "full", ValidatedLedgerIndex = 90, CompleteLedgers = "1-90" };
+        await harness.StartAsync();
+        await TestWait.UntilAsync(
+            () => harness.Snapshot.Read().State == PaymentMonitorState.Streaming, "the monitor to start streaming");
+
+        await node.PushTransactionAsync(TransactionFixtures.Parse(TransactionFixtures.XrpPayment));
+        await TestWait.UntilAsync(() => quoteStore.EnqueueCalls >= 1, "the first payment to be queued");
+
+        // The same transaction again: RecordAsync reports it as already stored, so this must not add a
+        // second enqueue call.
+        await node.PushTransactionAsync(TransactionFixtures.Parse(TransactionFixtures.XrpPayment));
+        await Task.Delay(150, TestContext.Current.CancellationToken);
+        Assert.Equal(1, quoteStore.EnqueueCalls);
+
+        // A genuinely different payment must still reach the enqueuer.
+        await node.PushTransactionAsync(TransactionFixtures.Parse(TransactionFixtures.PartialXrpPayment));
+        await TestWait.UntilAsync(
+            () => quoteStore.EnqueueCalls >= 2, "the second, genuinely new payment to be queued");
     }
 
     [Fact]
@@ -378,4 +453,55 @@ public class XrplPaymentMonitorTests
         Assert.Empty(harness.Store.Snapshot());
         Assert.Equal(0, harness.Snapshot.Read().AnomalyCount);
     }
+}
+
+/// <summary>
+/// An <see cref="IQuoteStore"/> that checks, at the moment <see cref="TryEnqueueValuationAsync"/> is
+/// called, whether the receipt handler has already run — proving the enqueue happens after delivery
+/// rather than racing or preceding it. Everything else delegates to a real <see cref="InMemoryQuoteStore"/>.
+/// </summary>
+public sealed class OrderCheckingQuoteStore : IQuoteStore
+{
+    private readonly InMemoryQuoteStore _inner = new InMemoryQuoteStore();
+    private readonly Func<int> _deliveryCount;
+
+    public OrderCheckingQuoteStore(Func<int> deliveryCount) => _deliveryCount = deliveryCount;
+
+    public int EnqueueCalls { get; private set; }
+
+    public bool HandlerHadAlreadyRunAtEnqueueTime { get; private set; }
+
+    public Task SaveQuoteAsync(StoredQuote quote, CancellationToken cancellationToken) =>
+        _inner.SaveQuoteAsync(quote, cancellationToken);
+
+    public Task<StoredQuote?> GetQuoteAsync(string pairKey, CancellationToken cancellationToken) =>
+        _inner.GetQuoteAsync(pairKey, cancellationToken);
+
+    public Task<IReadOnlyList<StoredQuote>> GetQuotesAsync(CancellationToken cancellationToken) =>
+        _inner.GetQuotesAsync(cancellationToken);
+
+    public Task<bool> TryEnqueueValuationAsync(PaymentValuation pending, CancellationToken cancellationToken)
+    {
+        EnqueueCalls++;
+        HandlerHadAlreadyRunAtEnqueueTime = _deliveryCount() > 0;
+        return _inner.TryEnqueueValuationAsync(pending, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken) =>
+        _inner.GetPendingValuationsAsync(limit, cancellationToken);
+
+    public Task MarkValuationAttemptedAsync(string transactionHash, DateTimeOffset attemptedAt, CancellationToken cancellationToken) =>
+        _inner.MarkValuationAttemptedAsync(transactionHash, attemptedAt, cancellationToken);
+
+    public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken) =>
+        _inner.SaveValuationAsync(valuation, cancellationToken);
+
+    public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) =>
+        _inner.GetUndeliveredValuationsAsync(limit, cancellationToken);
+
+    public Task MarkValuationDeliveredAsync(string transactionHash, CancellationToken cancellationToken) =>
+        _inner.MarkValuationDeliveredAsync(transactionHash, cancellationToken);
+
+    public Task<PaymentValuation?> GetValuationAsync(string transactionHash, CancellationToken cancellationToken) =>
+        _inner.GetValuationAsync(transactionHash, cancellationToken);
 }

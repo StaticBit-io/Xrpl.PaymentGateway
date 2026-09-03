@@ -29,9 +29,9 @@ public class ValuationEnqueuerTests
         ProcessedAt = DateTimeOffset.UtcNow,
     };
 
-    private static ValuationEnqueuer Build(TimeSpan enqueueTimeout, IQuoteStore store) =>
+    private static ValuationEnqueuer Build(TimeSpan storeTimeout, IQuoteStore store) =>
         new ValuationEnqueuer(
-            Options.Create(new QuoteOptions { Pairs = new[] { Xpm }, EnqueueTimeout = enqueueTimeout }),
+            Options.Create(new QuoteOptions { Pairs = new[] { Xpm }, StoreTimeout = storeTimeout }),
             store,
             new QuoteRegistry(new[] { Xpm }),
             TimeProvider.System,
