@@ -232,10 +232,43 @@ already exists and is funded. For anything else, point it at your own receiving 
 |---|---|
 | `POST /api/checkout/{buyerId}` | Address, destination tag, and an X-address carrying both |
 | `GET /api/checkout/{buyerId}/qr.svg` | The X-address as a scannable QR code |
+| `GET /api/checkout/{buyerId}/price` | What this checkout is priced at, in the quote asset, and how old that reading is. Empty until a quote pair is configured |
 | `GET /api/checkout/{buyerId}/payments` | What this buyer has paid. The page polls this |
+| `GET /api/checkout/{buyerId}/valuations` | What this buyer's payments turned out to be worth, a second and later signal than the payment itself |
 | `GET /api/payments` | Everything the handler has been given |
+| `GET /api/valuations` | Every valuation the handler has been given, whichever state it landed in |
 | `GET /api/recorded` | Everything the store holds, when the store offers a snapshot |
 | `GET /api/health` | The monitor's state; 503 when it is not streaming |
 | `POST /api/reconcile` | Redeliver and re-verify on demand |
+| `GET /api/quotes/health` | Pair freshness, refresh failures, pending valuations and the age of the oldest of them. 404 when no quote pairs are configured; 503 when configured but not healthy |
+| `GET /api/quotes/unresolved` | Payments the automatic pipeline has not resolved, for an operator to act on |
+| `POST /api/quotes/unresolved/{transactionHash}/settle` | Price one unresolved payment by hand, at a rate supplied in the body |
+| `POST /api/quotes/unresolved/{transactionHash}/write-off` | Close one unresolved payment with no quote amount, recording why |
 
 Set `Xrpl:StorePath` to keep payments in a file instead of memory, and they survive a restart.
+
+### Quotes and valuation in the sample
+
+Set `Xrpl:Quotes:Pairs` and the page grows a price at checkout, a valuation that appears on a payment row a
+few seconds after the payment itself, a quote health strip beside the monitor strip, and an "Unresolved
+payments" section for whatever the automatic pipeline could not price. Leave it empty, the shipped default,
+and the sample runs exactly as it does without the feature — `AddXrplPaymentQuotes` is never even called.
+
+```json
+"Xrpl": {
+  "Quotes": {
+    "Pairs": [
+      { "Currency": "XRP", "QuoteCurrency": "USD", "QuoteIssuer": "rIssuerAddress", "Rate": 0.55 }
+    ],
+    "RefusedCurrencies": []
+  }
+}
+```
+
+`Rate` is quote-asset units per unit of the received asset. The source behind this is
+`FixedRateQuoteSource`, a deliberate stand-in the sample ships with — fixed rates read straight from
+configuration, no network call at all. **Nothing about this prices anything real**; a real `IQuoteSource`
+reads liquidity off the ledger, and a real host brings its own pricing engine, the same way it brings its
+own `IPaymentStore`. `Xrpl:Quotes:RefusedCurrencies` names currencies that source throws for instead of
+pricing, which is what gives the unresolved queue and the settle/write-off buttons something genuine to
+act on in a demo that otherwise always prices cleanly.
