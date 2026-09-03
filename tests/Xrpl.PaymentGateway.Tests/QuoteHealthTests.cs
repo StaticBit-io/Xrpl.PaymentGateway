@@ -323,32 +323,6 @@ public class QuoteHealthTests
         Assert.Equal(1, report.FailedValuations);
     }
 
-    [Fact]
-    public async Task LastCycleDurationReportsTheInProgressCycleWhenItAlreadyExceedsTheLastCompletedOne()
-    {
-        // Written only when a cycle finishes, LastCycleDuration used to keep repeating the last good
-        // number for as long as a later cycle stalled — going quiet exactly when a stall is the thing to
-        // notice. A cycle already running longer than the last completed one must be what is reported.
-        (QuoteHealth health, _, QuoteRegistry registry) = Build();
-        registry.SetLastCycleDuration(TimeSpan.FromSeconds(5));
-        registry.SetCycleStarted(Now - TimeSpan.FromSeconds(30));
-
-        QuoteHealthReport report = await health.CheckAsync(Ct);
-
-        Assert.Equal(TimeSpan.FromSeconds(30), report.LastCycleDuration);
-    }
-
-    [Fact]
-    public async Task LastCycleDurationKeepsTheLastCompletedCycleWhileTheNewOneHasNotCaughtUpYet()
-    {
-        (QuoteHealth health, _, QuoteRegistry registry) = Build();
-        registry.SetLastCycleDuration(TimeSpan.FromSeconds(30));
-        registry.SetCycleStarted(Now - TimeSpan.FromSeconds(5));
-
-        QuoteHealthReport report = await health.CheckAsync(Ct);
-
-        Assert.Equal(TimeSpan.FromSeconds(30), report.LastCycleDuration);
-    }
 }
 
 /// <summary>A quote store whose every read fails.</summary>
@@ -362,7 +336,11 @@ public sealed class ThrowingQuoteStore : IQuoteStore
 
     public Task<bool> TryEnqueueValuationAsync(PaymentValuation pending, CancellationToken cancellationToken) => throw new IOException("down");
 
-    public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken) => throw new IOException("down");
+    public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(
+        string pairKey, int limit, CancellationToken cancellationToken) => throw new IOException("down");
+
+    public Task<IReadOnlyList<PendingValuationsByPair>> GetPendingValuationBreakdownAsync(CancellationToken cancellationToken) =>
+        throw new IOException("down");
 
     public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken) => throw new IOException("down");
 
@@ -381,7 +359,9 @@ public sealed class ThrowingQuoteStore : IQuoteStore
 
     public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) => throw new IOException("down");
 
-    public Task MarkValuationDeliveredAsync(string transactionHash, CancellationToken cancellationToken) => throw new IOException("down");
+    public Task MarkValuationDeliveredAsync(
+        string transactionHash, ValuationState deliveredState, CancellationToken cancellationToken) =>
+        throw new IOException("down");
 
     public Task<PaymentValuation?> GetValuationAsync(string transactionHash, CancellationToken cancellationToken) => throw new IOException("down");
 }

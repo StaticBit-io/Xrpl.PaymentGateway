@@ -28,8 +28,12 @@ public sealed class FlakyQuoteStore : IQuoteStore
     public Task<bool> TryEnqueueValuationAsync(PaymentValuation pending, CancellationToken cancellationToken) =>
         _inner.TryEnqueueValuationAsync(pending, cancellationToken);
 
-    public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(int limit, CancellationToken cancellationToken) =>
-        _inner.GetPendingValuationsAsync(limit, cancellationToken);
+    public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(
+        string pairKey, int limit, CancellationToken cancellationToken) =>
+        _inner.GetPendingValuationsAsync(pairKey, limit, cancellationToken);
+
+    public Task<IReadOnlyList<PendingValuationsByPair>> GetPendingValuationBreakdownAsync(CancellationToken cancellationToken) =>
+        _inner.GetPendingValuationBreakdownAsync(cancellationToken);
 
     public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken)
     {
@@ -60,8 +64,9 @@ public sealed class FlakyQuoteStore : IQuoteStore
     public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) =>
         _inner.GetUndeliveredValuationsAsync(limit, cancellationToken);
 
-    public Task MarkValuationDeliveredAsync(string transactionHash, CancellationToken cancellationToken) =>
-        _inner.MarkValuationDeliveredAsync(transactionHash, cancellationToken);
+    public Task MarkValuationDeliveredAsync(
+        string transactionHash, ValuationState deliveredState, CancellationToken cancellationToken) =>
+        _inner.MarkValuationDeliveredAsync(transactionHash, deliveredState, cancellationToken);
 
     public Task<PaymentValuation?> GetValuationAsync(string transactionHash, CancellationToken cancellationToken) =>
         _inner.GetValuationAsync(transactionHash, cancellationToken);

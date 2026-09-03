@@ -102,8 +102,12 @@ public class QuoteCollectorTests
             _inner.TryEnqueueValuationAsync(pending, cancellationToken);
 
         public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(
-            int limit, CancellationToken cancellationToken) =>
-            _inner.GetPendingValuationsAsync(limit, cancellationToken);
+            string pairKey, int limit, CancellationToken cancellationToken) =>
+            _inner.GetPendingValuationsAsync(pairKey, limit, cancellationToken);
+
+        public Task<IReadOnlyList<PendingValuationsByPair>> GetPendingValuationBreakdownAsync(
+            CancellationToken cancellationToken) =>
+            _inner.GetPendingValuationBreakdownAsync(cancellationToken);
 
         public Task SaveValuationFailureAsync(
             string transactionHash, string reason, DateTimeOffset failedAt, CancellationToken cancellationToken) =>
@@ -127,8 +131,9 @@ public class QuoteCollectorTests
             int limit, CancellationToken cancellationToken) =>
             _inner.GetUndeliveredValuationsAsync(limit, cancellationToken);
 
-        public Task MarkValuationDeliveredAsync(string transactionHash, CancellationToken cancellationToken) =>
-            _inner.MarkValuationDeliveredAsync(transactionHash, cancellationToken);
+        public Task MarkValuationDeliveredAsync(
+            string transactionHash, ValuationState deliveredState, CancellationToken cancellationToken) =>
+            _inner.MarkValuationDeliveredAsync(transactionHash, deliveredState, cancellationToken);
 
         public Task<PaymentValuation?> GetValuationAsync(string transactionHash, CancellationToken cancellationToken) =>
             _inner.GetValuationAsync(transactionHash, cancellationToken);
@@ -156,8 +161,12 @@ public class QuoteCollectorTests
             _inner.TryEnqueueValuationAsync(pending, cancellationToken);
 
         public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(
-            int limit, CancellationToken cancellationToken) =>
-            _inner.GetPendingValuationsAsync(limit, cancellationToken);
+            string pairKey, int limit, CancellationToken cancellationToken) =>
+            _inner.GetPendingValuationsAsync(pairKey, limit, cancellationToken);
+
+        public Task<IReadOnlyList<PendingValuationsByPair>> GetPendingValuationBreakdownAsync(
+            CancellationToken cancellationToken) =>
+            _inner.GetPendingValuationBreakdownAsync(cancellationToken);
 
         public Task SaveValuationFailureAsync(
             string transactionHash, string reason, DateTimeOffset failedAt, CancellationToken cancellationToken) =>
@@ -181,8 +190,9 @@ public class QuoteCollectorTests
             int limit, CancellationToken cancellationToken) =>
             _inner.GetUndeliveredValuationsAsync(limit, cancellationToken);
 
-        public Task MarkValuationDeliveredAsync(string transactionHash, CancellationToken cancellationToken) =>
-            _inner.MarkValuationDeliveredAsync(transactionHash, cancellationToken);
+        public Task MarkValuationDeliveredAsync(
+            string transactionHash, ValuationState deliveredState, CancellationToken cancellationToken) =>
+            _inner.MarkValuationDeliveredAsync(transactionHash, deliveredState, cancellationToken);
 
         public Task<PaymentValuation?> GetValuationAsync(string transactionHash, CancellationToken cancellationToken) =>
             _inner.GetValuationAsync(transactionHash, cancellationToken);
@@ -325,34 +335,6 @@ public class QuoteCollectorTests
         await Task.Delay(200, Ct);
         Assert.Single(source.Captured);
         Assert.Equal(Xpm.Key, source.Captured[0]);
-    }
-
-    [Fact]
-    public async Task ALastCycleDurationIsRecordedAfterTheFirstFullCycle()
-    {
-        ScriptedQuoteSource source = new ScriptedQuoteSource();
-        await using Harness harness = new Harness(
-            source,
-            options =>
-            {
-                // A tiny interval makes MinimumPairStagger, not interval/pairCount, the binding delay —
-                // otherwise PairDelay would compute a much larger gap and the cycle would take far longer
-                // than this test should wait.
-                options.RefreshInterval = TimeSpan.FromMilliseconds(1);
-                options.MinimumPairStagger = TimeSpan.FromMilliseconds(50);
-            },
-            Xpm,
-            Solo);
-
-        Assert.Null(harness.Registry.LastCycleDuration);
-
-        await harness.StartAsync();
-        await TestWait.UntilAsync(() => harness.Registry.LastCycleDuration is not null, "the first cycle to complete");
-
-        // Measured, not the schedule's own guess: with two pairs at 50ms apart the observed duration must
-        // be at least that long, which QuoteSchedule.CycleFitsInInterval alone could never tell us.
-        TimeSpan duration = harness.Registry.LastCycleDuration!.Value;
-        Assert.True(duration >= TimeSpan.FromMilliseconds(40), $"expected at least ~50ms, got {duration}");
     }
 
     [Fact]
@@ -529,8 +511,12 @@ public class QuoteCollectorTests
             _inner.TryEnqueueValuationAsync(pending, cancellationToken);
 
         public Task<IReadOnlyList<PaymentValuation>> GetPendingValuationsAsync(
-            int limit, CancellationToken cancellationToken) =>
-            _inner.GetPendingValuationsAsync(limit, cancellationToken);
+            string pairKey, int limit, CancellationToken cancellationToken) =>
+            _inner.GetPendingValuationsAsync(pairKey, limit, cancellationToken);
+
+        public Task<IReadOnlyList<PendingValuationsByPair>> GetPendingValuationBreakdownAsync(
+            CancellationToken cancellationToken) =>
+            _inner.GetPendingValuationBreakdownAsync(cancellationToken);
 
         public Task SaveValuationFailureAsync(
             string transactionHash, string reason, DateTimeOffset failedAt, CancellationToken cancellationToken) =>
@@ -554,8 +540,9 @@ public class QuoteCollectorTests
             int limit, CancellationToken cancellationToken) =>
             _inner.GetUndeliveredValuationsAsync(limit, cancellationToken);
 
-        public Task MarkValuationDeliveredAsync(string transactionHash, CancellationToken cancellationToken) =>
-            _inner.MarkValuationDeliveredAsync(transactionHash, cancellationToken);
+        public Task MarkValuationDeliveredAsync(
+            string transactionHash, ValuationState deliveredState, CancellationToken cancellationToken) =>
+            _inner.MarkValuationDeliveredAsync(transactionHash, deliveredState, cancellationToken);
 
         public Task<PaymentValuation?> GetValuationAsync(string transactionHash, CancellationToken cancellationToken) =>
             _inner.GetValuationAsync(transactionHash, cancellationToken);

@@ -120,7 +120,7 @@ public class PostgresQuoteStoreTests : QuoteStoreContract, IAsyncDisposable
         Assert.NotNull(stillPending);
         Assert.Equal(ValuationState.Pending, stillPending!.State);
         Assert.Contains(
-            await store.GetPendingValuationsAsync(10, TestContext.Current.CancellationToken),
+            await store.GetPendingValuationsAsync("PAIR", 10, TestContext.Current.CancellationToken),
             v => v.TransactionHash == "PRE-EXISTING-PENDING");
 
         // The new queue methods, exercised end to end on the migrated table.
@@ -146,6 +146,71 @@ public class PostgresQuoteStoreTests : QuoteStoreContract, IAsyncDisposable
         Assert.NotNull(read);
         Assert.Equal(ValuationState.WrittenOff, read!.State);
         Assert.Equal("dust", read.WriteOffReason);
+    }
+
+    [Fact]
+    public async Task EnsureSchemaAsyncReplacesThePendingIndexOnATableThatPredatesThePerPairShape()
+    {
+        // valuations_pending used to index (queued_seq) only; GetPendingValuationsAsync now also filters
+        // by pair_key, so a table built before that change needs the old index gone and the new,
+        // pair-aware one in its place — not left sitting beside it under a different name, and not
+        // silently kept as-is, which is what CREATE INDEX IF NOT EXISTS on the OLD name would do.
+        await SkipUnlessDatabaseIsReachableAsync();
+
+        PostgresQuoteStore bootstrap = new PostgresQuoteStore(ConnectionString, _schema);
+        await bootstrap.EnsureSchemaAsync(TestContext.Current.CancellationToken);
+        _created = true;
+
+        await using (NpgsqlConnection connection = new NpgsqlConnection(ConnectionString))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            // Roll the schema back to the pre-migration index shape: today's name dropped, the old one
+            // recreated the way every earlier gateway version built it.
+            await using NpgsqlCommand oldIndex = new NpgsqlCommand(
+                $"""
+                DROP INDEX IF EXISTS "{_schema}".valuations_pending_by_pair;
+                CREATE INDEX valuations_pending ON "{_schema}".valuations (queued_seq) WHERE state = 0;
+                """,
+                connection);
+            await oldIndex.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        PostgresQuoteStore store = new PostgresQuoteStore(ConnectionString, _schema);
+        await store.EnsureSchemaAsync(TestContext.Current.CancellationToken);
+
+        await using (NpgsqlConnection connection = new NpgsqlConnection(ConnectionString))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            await using NpgsqlCommand check = new NpgsqlCommand(
+                "SELECT indexname FROM pg_indexes WHERE schemaname = @schema AND tablename = 'valuations'",
+                connection);
+            check.Parameters.AddWithValue("schema", _schema);
+
+            List<string> names = new List<string>();
+            await using NpgsqlDataReader reader =
+                await check.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+            while (await reader.ReadAsync(TestContext.Current.CancellationToken))
+            {
+                names.Add(reader.GetString(0));
+            }
+
+            Assert.DoesNotContain("valuations_pending", names);
+            Assert.Contains("valuations_pending_by_pair", names);
+        }
+
+        // The migrated index actually works: a pair-scoped read finds a row queued after the migration.
+        PaymentValuation pending = new PaymentValuation
+        {
+            TransactionHash = "AFTER-INDEX-MIGRATION",
+            PairKey = "PAIR",
+            Amount = 1m,
+            PaymentLedgerIndex = 1,
+            EnqueuedAt = DateTimeOffset.UtcNow,
+        };
+        Assert.True(await store.TryEnqueueValuationAsync(pending, TestContext.Current.CancellationToken));
+        Assert.Contains(
+            await store.GetPendingValuationsAsync("PAIR", 10, TestContext.Current.CancellationToken),
+            v => v.TransactionHash == "AFTER-INDEX-MIGRATION");
     }
 
     [Fact]
