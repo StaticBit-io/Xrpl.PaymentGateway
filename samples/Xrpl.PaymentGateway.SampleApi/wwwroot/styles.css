@@ -404,7 +404,9 @@ code.inline {
 }
 
 .valuation.valued { color: var(--ok); }
+.valuation.pending { color: var(--muted); }
 .valuation.failed,
+.valuation.stuck,
 .valuation.written-off { color: var(--warn); }
 
 .unresolved {

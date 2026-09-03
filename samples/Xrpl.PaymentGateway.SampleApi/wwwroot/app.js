@@ -492,7 +492,16 @@ function renderPayment(payment) {
         line.className = "valuation valued";
         line.textContent = `worth ${payment.value} ${payment.currency} — already the quote asset, no conversion needed`;
         item.appendChild(line);
+        return item;
     }
+
+    // Everything else is waiting on a second signal, and says so. A row that showed the amount and nothing
+    // else could not be told apart from one whose valuation is never coming — which is exactly the case a
+    // buyer most needs to hear about.
+    const pending = document.createElement("div");
+    pending.className = "valuation pending";
+    pending.textContent = "waiting to be priced…";
+    item.appendChild(pending);
 
     return item;
 }
@@ -522,7 +531,16 @@ async function pollValuations() {
             }
 
             valuedShown.add(valuation.transactionHash);
-            row.appendChild(renderValuation(valuation));
+
+            // Replaces the waiting line rather than stacking under it: one row, one thing said about its
+            // value at a time.
+            const line = renderValuation(valuation);
+            const existing = row.querySelector(".valuation");
+            if (existing) {
+                existing.replaceWith(line);
+            } else {
+                row.appendChild(line);
+            }
         }
     } catch {
         // Same as pollPayments: the next tick asks again.
@@ -585,8 +603,37 @@ async function pollUnresolved() {
         }
 
         el("unresolved-empty").hidden = page.items.length !== 0;
+        markPaymentsWaitingOnOperator(page.items);
     } catch {
         // Next tick tries again.
+    }
+}
+
+/**
+ * How long an entry sits in the operator's queue before its payment row stops saying "waiting" and starts
+ * naming the operator. The queue itself is read with a minimum age of zero here, so an entry appears on it
+ * the instant it exists — including one a healthy pair is about to price a second later — and saying a
+ * buyer's money is stuck the moment it arrives would be wrong far more often than right.
+ */
+const STUCK_AFTER_MS = 30000;
+
+/**
+ * The buyer's half of the operator queue: a payment nobody could price is money that arrived and has no
+ * value against it yet, and the row should say that rather than sit blank. Matched by hash, so it covers
+ * only rows this page is showing; the queue itself is not scoped to one buyer.
+ */
+function markPaymentsWaitingOnOperator(entries) {
+    for (const entry of entries) {
+        if (Date.now() - Date.parse(entry.enqueuedAt) < STUCK_AFTER_MS) {
+            continue;
+        }
+
+        const row = document.querySelector(`#payments li[data-hash="${CSS.escape(entry.transactionHash)}"]`);
+        const line = row?.querySelector(".valuation.pending");
+        if (line) {
+            line.className = "valuation stuck";
+            line.textContent = "received, but it could not be priced — an operator has been given it";
+        }
     }
 }
 
