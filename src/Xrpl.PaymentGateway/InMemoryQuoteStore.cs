@@ -99,7 +99,7 @@ public sealed class InMemoryQuoteStore : IQuoteStore
         }
     }
 
-    public Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken)
+    public Task<bool> SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(valuation);
 
@@ -113,11 +113,15 @@ public sealed class InMemoryQuoteStore : IQuoteStore
             if (_valuations.TryGetValue(valuation.TransactionHash, out PaymentValuation? current)
                 && current.State is ValuationState.Pending or ValuationState.Failed)
             {
-                _valuations[valuation.TransactionHash] = valuation;
+                // Delivered is enforced here rather than trusted from valuation itself: a caller that
+                // builds the replacement by copying an existing delivered row — the natural way to carry
+                // its other fields forward — must not have that copy's flag survive into the resolved row.
+                _valuations[valuation.TransactionHash] = valuation.Delivered ? WithDeliveredCleared(valuation) : valuation;
+                return Task.FromResult(true);
             }
         }
 
-        return Task.CompletedTask;
+        return Task.FromResult(false);
     }
 
     public Task SaveValuationFailureAsync(
@@ -137,7 +141,7 @@ public sealed class InMemoryQuoteStore : IQuoteStore
         return Task.CompletedTask;
     }
 
-    public Task SaveWriteOffAsync(
+    public Task<bool> SaveWriteOffAsync(
         string transactionHash, string reason, DateTimeOffset writtenOffAt, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(transactionHash);
@@ -145,13 +149,15 @@ public sealed class InMemoryQuoteStore : IQuoteStore
 
         lock (_gate)
         {
-            if (_valuations.TryGetValue(transactionHash, out PaymentValuation? entry) && entry.State == ValuationState.Failed)
+            if (_valuations.TryGetValue(transactionHash, out PaymentValuation? entry)
+                && entry.State is ValuationState.Pending or ValuationState.Failed)
             {
                 _valuations[transactionHash] = WithWriteOff(entry, reason, writtenOffAt);
+                return Task.FromResult(true);
             }
         }
 
-        return Task.CompletedTask;
+        return Task.FromResult(false);
     }
 
     public Task<IReadOnlyList<PaymentValuation>> GetFailedValuationsAsync(
@@ -185,10 +191,42 @@ public sealed class InMemoryQuoteStore : IQuoteStore
         }
     }
 
+    public Task<IReadOnlyList<PaymentValuation>> GetUnresolvedValuationsAsync(
+        DateTimeOffset olderThan, int limit, int offset, CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+
+        lock (_gate)
+        {
+            // _order is enqueue order already, so a stable OrderBy over it makes ties on EnqueuedAt fall
+            // back to enqueue order, matching PostgresQuoteStore's "ORDER BY enqueued_at, queued_seq".
+            List<PaymentValuation> result = _order
+                .Select(hash => _valuations[hash])
+                .Where(entry => entry.State is ValuationState.Pending or ValuationState.Failed
+                    && entry.EnqueuedAt <= olderThan)
+                .OrderBy(entry => entry.EnqueuedAt)
+                .Skip(offset)
+                .Take(limit)
+                .ToList();
+
+            return Task.FromResult<IReadOnlyList<PaymentValuation>>(result);
+        }
+    }
+
+    public Task<int> CountUnresolvedValuationsAsync(DateTimeOffset olderThan, CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            return Task.FromResult(_valuations.Values.Count(
+                entry => entry.State is ValuationState.Pending or ValuationState.Failed && entry.EnqueuedAt <= olderThan));
+        }
+    }
+
     public Task<IReadOnlyList<PaymentValuation>> GetUndeliveredValuationsAsync(int limit, CancellationToken cancellationToken) =>
         Task.FromResult(Take(limit, entry => entry.State != ValuationState.Pending && !entry.Delivered));
 
-    public Task MarkValuationDeliveredAsync(
+    public Task<bool> MarkValuationDeliveredAsync(
         string transactionHash, ValuationState deliveredState, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(transactionHash);
@@ -202,10 +240,11 @@ public sealed class InMemoryQuoteStore : IQuoteStore
             if (_valuations.TryGetValue(transactionHash, out PaymentValuation? entry) && entry.State == deliveredState)
             {
                 _valuations[transactionHash] = Deliver(entry);
+                return Task.FromResult(true);
             }
         }
 
-        return Task.CompletedTask;
+        return Task.FromResult(false);
     }
 
     public Task<PaymentValuation?> GetValuationAsync(string transactionHash, CancellationToken cancellationToken)
@@ -268,6 +307,33 @@ public sealed class InMemoryQuoteStore : IQuoteStore
         WrittenOffAt = entry.WrittenOffAt,
         WriteOffReason = entry.WriteOffReason,
         Delivered = true,
+    };
+
+    /// <summary>A copy of <paramref name="valuation"/> with <see cref="PaymentValuation.Delivered"/> forced false.</summary>
+    private static PaymentValuation WithDeliveredCleared(PaymentValuation valuation) => new PaymentValuation
+    {
+        TransactionHash = valuation.TransactionHash,
+        PairKey = valuation.PairKey,
+        Amount = valuation.Amount,
+        PaymentLedgerIndex = valuation.PaymentLedgerIndex,
+        DestinationTag = valuation.DestinationTag,
+        EnqueuedAt = valuation.EnqueuedAt,
+        State = valuation.State,
+        ValuedAt = valuation.ValuedAt,
+        QuoteAmount = valuation.QuoteAmount,
+        EffectivePrice = valuation.EffectivePrice,
+        MarginalPrice = valuation.MarginalPrice,
+        SlippagePercent = valuation.SlippagePercent,
+        FullyFilled = valuation.FullyFilled,
+        BookTruncated = valuation.BookTruncated,
+        Route = valuation.Route,
+        SnapshotLedgerIndex = valuation.SnapshotLedgerIndex,
+        SnapshotCapturedAt = valuation.SnapshotCapturedAt,
+        FailedAt = valuation.FailedAt,
+        FailureReason = valuation.FailureReason,
+        WrittenOffAt = valuation.WrittenOffAt,
+        WriteOffReason = valuation.WriteOffReason,
+        Delivered = false,
     };
 
     private static PaymentValuation WithFailure(PaymentValuation entry, string reason, DateTimeOffset failedAt) => new PaymentValuation

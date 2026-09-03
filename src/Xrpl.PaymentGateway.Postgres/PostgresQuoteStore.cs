@@ -112,6 +112,11 @@ public sealed class PostgresQuoteStore : IQuoteStore
 
             CREATE INDEX IF NOT EXISTS valuations_failed
                 ON "{_schema}".valuations (failed_at, queued_seq) WHERE state = 3;
+
+            -- Pending and Failed together, ordered by enqueued_at: what GetUnresolvedValuationsAsync
+            -- reads for the operator's unresolved-entry queue, which spans both states.
+            CREATE INDEX IF NOT EXISTS valuations_unresolved
+                ON "{_schema}".valuations (enqueued_at, queued_seq) WHERE state = 0 OR state = 3;
             """;
 
         await using NpgsqlCommand command = new NpgsqlCommand(sql, connection);
@@ -256,11 +261,14 @@ public sealed class PostgresQuoteStore : IQuoteStore
         return result;
     }
 
-    public async Task SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken)
+    public async Task<bool> SaveValuationAsync(PaymentValuation valuation, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(valuation);
 
         await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        // delivered = FALSE is unconditional here, not bound from valuation.Delivered: a caller that builds
+        // the replacement by copying an existing delivered row — the natural way to carry its other fields
+        // forward — must not have that copy's flag survive into the resolved row.
         await using NpgsqlCommand command = new NpgsqlCommand(
             $"""
             UPDATE "{_schema}".valuations SET
@@ -298,7 +306,8 @@ public sealed class PostgresQuoteStore : IQuoteStore
         command.Parameters.AddWithValue("pendingState", (int)ValuationState.Pending);
         command.Parameters.AddWithValue("failedState", (int)ValuationState.Failed);
 
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        int affected = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        return affected == 1;
     }
 
     public async Task SaveValuationFailureAsync(
@@ -327,7 +336,7 @@ public sealed class PostgresQuoteStore : IQuoteStore
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task SaveWriteOffAsync(
+    public async Task<bool> SaveWriteOffAsync(
         string transactionHash, string reason, DateTimeOffset writtenOffAt, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(transactionHash);
@@ -341,17 +350,19 @@ public sealed class PostgresQuoteStore : IQuoteStore
                 written_off_at = @writtenOffAt,
                 write_off_reason = @reason,
                 delivered = FALSE
-            WHERE transaction_hash = @hash AND state = @failedState
+            WHERE transaction_hash = @hash AND (state = @pendingState OR state = @failedState)
             """,
             connection);
 
         command.Parameters.AddWithValue("hash", transactionHash);
         command.Parameters.AddWithValue("writtenOffState", (int)ValuationState.WrittenOff);
+        command.Parameters.AddWithValue("pendingState", (int)ValuationState.Pending);
         command.Parameters.AddWithValue("failedState", (int)ValuationState.Failed);
         command.Parameters.AddWithValue("writtenOffAt", writtenOffAt);
         command.Parameters.AddWithValue("reason", reason);
 
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        int affected = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        return affected == 1;
     }
 
     public Task<IReadOnlyList<PaymentValuation>> GetFailedValuationsAsync(
@@ -364,6 +375,31 @@ public sealed class PostgresQuoteStore : IQuoteStore
         await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using NpgsqlCommand command = new NpgsqlCommand(
             $"""SELECT COUNT(*) FROM "{_schema}".valuations WHERE {StateFilter(ValuationState.Failed)}""", connection);
+
+        object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        return (int)(long)result!;
+    }
+
+    /// <summary>A SQL predicate matching Pending or Failed rows enqueued at or before a bound parameter.</summary>
+    private const string UnresolvedFilter =
+        "(state = 0 OR state = 3) AND enqueued_at <= @olderThan";
+
+    public Task<IReadOnlyList<PaymentValuation>> GetUnresolvedValuationsAsync(
+        DateTimeOffset olderThan, int limit, int offset, CancellationToken cancellationToken) =>
+        QueryValuationsAsync(
+            UnresolvedFilter,
+            "enqueued_at, queued_seq",
+            limit,
+            offset,
+            cancellationToken,
+            bind: command => command.Parameters.AddWithValue("olderThan", olderThan));
+
+    public async Task<int> CountUnresolvedValuationsAsync(DateTimeOffset olderThan, CancellationToken cancellationToken)
+    {
+        await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using NpgsqlCommand command = new NpgsqlCommand(
+            $"""SELECT COUNT(*) FROM "{_schema}".valuations WHERE {UnresolvedFilter}""", connection);
+        command.Parameters.AddWithValue("olderThan", olderThan);
 
         object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
         return (int)(long)result!;
@@ -385,7 +421,7 @@ public sealed class PostgresQuoteStore : IQuoteStore
     /// </remarks>
     private static string StateFilter(ValuationState state) => $"state = {(int)state}";
 
-    public async Task MarkValuationDeliveredAsync(
+    public async Task<bool> MarkValuationDeliveredAsync(
         string transactionHash, ValuationState deliveredState, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(transactionHash);
@@ -403,7 +439,8 @@ public sealed class PostgresQuoteStore : IQuoteStore
         command.Parameters.AddWithValue("hash", transactionHash);
         command.Parameters.AddWithValue("deliveredState", (int)deliveredState);
 
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        int affected = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        return affected == 1;
     }
 
     public async Task<PaymentValuation?> GetValuationAsync(string transactionHash, CancellationToken cancellationToken)

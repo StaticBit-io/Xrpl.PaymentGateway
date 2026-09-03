@@ -104,7 +104,7 @@ public sealed class PaymentValuation
     /// transient and shared by every entry against that pair, so none of it fails an entry; the entry simply
     /// stays <see cref="ValuationState.Pending"/> until conditions allow. There is deliberately no retry
     /// counter or backoff behind this: a cause that terminates is, by definition, one another attempt cannot
-    /// fix on its own — an operator, through <see cref="IFailedValuationAdmin"/>, is what moves it on from
+    /// fix on its own — an operator, through <see cref="IUnresolvedValuationAdmin"/>, is what moves it on from
     /// here.
     /// </remarks>
     public DateTimeOffset? FailedAt { get; init; }
