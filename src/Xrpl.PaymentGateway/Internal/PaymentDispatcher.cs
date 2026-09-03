@@ -8,40 +8,31 @@ namespace Xrpl.PaymentGateway.Internal;
 /// <see cref="RecordAsync"/> throws on store failures so the caller can retry them.
 /// <see cref="DeliverAsync"/> never throws: a broken handler must not stop the ledger being followed.
 /// </summary>
+/// <remarks>
+/// Deliberately does not know about <c>ValuationEnqueuer</c>. Queueing a valuation belongs after the
+/// receipt handler has been given its chance, so callers enqueue it explicitly, after
+/// <see cref="DeliverAsync"/>, and only for a payment <see cref="RecordAsync"/> just accepted as new — a
+/// replay costs neither call. That placement fixes the ordering, not the cost: the caller's method is
+/// still the per-transaction sink the catch-up loop awaits, so a quote store that hangs still costs a
+/// newly recorded payment during catch-up either way — see the remarks on <c>XrplPaymentMonitor
+/// .ProcessTransactionAsync</c> for the full accounting.
+/// </remarks>
 internal sealed class PaymentDispatcher
 {
     private readonly IPaymentStore _store;
     private readonly IPaymentReceivedHandler _handler;
     private readonly ILogger _logger;
-    private readonly ValuationEnqueuer? _valuationEnqueuer;
 
-    public PaymentDispatcher(
-        IPaymentStore store,
-        IPaymentReceivedHandler handler,
-        ILogger logger,
-        ValuationEnqueuer? valuationEnqueuer = null)
+    public PaymentDispatcher(IPaymentStore store, IPaymentReceivedHandler handler, ILogger logger)
     {
         _store = store;
         _handler = handler;
         _logger = logger;
-        _valuationEnqueuer = valuationEnqueuer;
     }
 
     /// <summary>Persists the record. Returns false when the hash was already stored.</summary>
-    public async Task<bool> RecordAsync(PaymentRecord record, CancellationToken cancellationToken)
-    {
-        bool added = await _store.TryAddPaymentAsync(record, cancellationToken).ConfigureAwait(false);
-
-        if (_valuationEnqueuer is not null)
-        {
-            // Offered even when the payment was already stored. Reconciliation replays a window of
-            // ledgers precisely so a valuation that never got queued can still be picked up, and the
-            // quote store rejects the duplicate itself.
-            await _valuationEnqueuer.EnqueueAsync(record, cancellationToken).ConfigureAwait(false);
-        }
-
-        return added;
-    }
+    public Task<bool> RecordAsync(PaymentRecord record, CancellationToken cancellationToken) =>
+        _store.TryAddPaymentAsync(record, cancellationToken);
 
     /// <summary>
     /// Resolves the buyer, hands the payment to the host, and marks it handled on success.

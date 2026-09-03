@@ -32,6 +32,7 @@ internal sealed class XrplPaymentMonitor : BackgroundService
     private readonly NodePool _pool;
     private readonly TransactionProcessor _processor;
     private readonly PaymentDispatcher _dispatcher;
+    private readonly ValuationEnqueuer? _valuationEnqueuer;
     private readonly CatchUpRunner _catchUp;
     private readonly StoreRetryPolicy _storeRetry;
     private readonly ReconnectBackoff _backoff;
@@ -65,7 +66,8 @@ internal sealed class XrplPaymentMonitor : BackgroundService
         _logger = logger;
         _pool = new NodePool(_options.Nodes);
         _processor = new TransactionProcessor(_options.Address, timeProvider, logger);
-        _dispatcher = new PaymentDispatcher(store, handler, logger, valuationEnqueuer);
+        _dispatcher = new PaymentDispatcher(store, handler, logger);
+        _valuationEnqueuer = valuationEnqueuer;
         _catchUp = new CatchUpRunner(logger);
         _backoff = new ReconnectBackoff(_options.ReconnectBaseDelay, _options.ReconnectMaxDelay);
         _storeRetry = new StoreRetryPolicy(
@@ -554,8 +556,11 @@ internal sealed class XrplPaymentMonitor : BackgroundService
 
         if (!isNew)
         {
-            // Already stored. Counting the anomaly again on every catch-up would inflate a number the
-            // operator is told to treat as a call to investigate.
+            // Already stored — a replay, not a new arrival. Counting the anomaly again on every catch-up
+            // would inflate a number the operator is told to treat as a call to investigate, and this
+            // return is also what keeps the quote store off the cost of a replay entirely: neither
+            // DeliverAsync nor EnqueueAsync below runs for it. A long catch-up window is mostly payments
+            // the store has already seen, so this is the case that actually matters for throughput.
             return;
         }
 
@@ -564,7 +569,27 @@ internal sealed class XrplPaymentMonitor : BackgroundService
             _snapshot.IncrementAnomaly();
         }
 
+        // The valuation is queued after delivery has been attempted, win or lose: the receipt handler
+        // must see the payment first, and a handler that throws must not cost the valuation.
+        //
+        // This is reached only for a payment RecordAsync just accepted as new, but it is not free even
+        // then: ProcessTransactionAsync is the very sink CatchUpRunner.RunAsync awaits once per
+        // transaction while replaying a page, so a quote store whose write hangs still costs up to
+        // QuoteOptions.StoreTimeout here, once per newly recorded payment, before the next transaction in
+        // the page can be looked at. Moving the enqueue below DeliverAsync fixed the ordering — the
+        // receipt handler now always runs first — but it does not take the quote store off the catch-up
+        // path; nothing after RecordAsync does. The exchange that does matter is a different one: because
+        // EnqueueAsync never throws (see its own remarks) and this monitor never re-offers an already-
+        // stored payment, a valuation lost to a failed or timed-out enqueue here is not retried from this
+        // method at all — only PaymentMonitorHealth's reconciliation sweep recovers it, by re-reading
+        // recent payments and offering every one of them regardless of newness, and only within its
+        // configured ReconcileWindow.
         await _dispatcher.DeliverAsync(record, cancellationToken).ConfigureAwait(false);
+
+        if (_valuationEnqueuer is not null)
+        {
+            await _valuationEnqueuer.EnqueueAsync(record, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private async Task PersistCursorAsync(uint cursor, CancellationToken cancellationToken)

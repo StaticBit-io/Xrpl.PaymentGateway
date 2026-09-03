@@ -8,11 +8,20 @@ namespace Xrpl.PaymentGateway.Internal;
 /// Puts a recorded payment in line to be priced.
 /// </summary>
 /// <remarks>
-/// Never throws. This runs on the path that records money, and an optional feature has no business
-/// stopping it: a quote store that is down costs a valuation, which reconciliation re-offers, whereas a
-/// thrown exception here would cost the ledger cursor its progress. The store write is additionally bounded
-/// by <see cref="QuoteOptions.EnqueueTimeout"/>: a store that merely hangs, rather than throwing outright,
-/// must not be allowed to stall this path indefinitely either.
+/// Never throws. Called after the receipt handler has had its chance — first on the live and catch-up
+/// path, once <c>DeliverAsync</c> has been attempted and only for a payment just recorded as new, and
+/// again unconditionally from reconciliation's sweep, which re-offers every payment it re-reads regardless
+/// of newness because it is the recovery path for anything the live/catch-up call below lost.
+/// <para>
+/// This call is bounded by <see cref="QuoteOptions.StoreTimeout"/> so a hanging quote store cannot stall
+/// indefinitely, but the bound is not zero cost: on the live and catch-up path it is still awaited by
+/// <c>XrplPaymentMonitor.ProcessTransactionAsync</c>, the same per-transaction sink the catch-up loop
+/// replays through, so a newly recorded payment can still cost up to <see cref="QuoteOptions.StoreTimeout"/>
+/// there. It is never on the path that records money — <c>PaymentDispatcher.RecordAsync</c> — so it never
+/// blocks a payment from being stored or delivered, and a replayed payment (already in the store) reaches
+/// neither this call nor delivery at all, which is what keeps a long catch-up window cheap in the common
+/// case.
+/// </para>
 /// </remarks>
 internal sealed class ValuationEnqueuer
 {
@@ -63,7 +72,7 @@ internal sealed class ValuationEnqueuer
             // timeout surfaces here as an OperationCanceledException whose token is not the caller's,
             // which the catch below treats exactly like any other store failure.
             using CancellationTokenSource timeoutCts =
-                new CancellationTokenSource(_options.EnqueueTimeout, _timeProvider);
+                new CancellationTokenSource(_options.StoreTimeout, _timeProvider);
             using CancellationTokenSource linked =
                 CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
 
@@ -85,12 +94,14 @@ internal sealed class ValuationEnqueuer
         }
         catch (Exception ex)
         {
-            // Covers both an outright store failure and the enqueue timeout above. Either way the payment
-            // is already recorded; reconciliation re-offers every payment in its window, so a miss here
-            // heals itself.
+            // Covers both an outright store failure and the store timeout above. Either way the payment
+            // is already recorded and its receipt already announced, so nothing here costs the payment
+            // itself — only its price. Nothing in this library re-offers it on its own: the host must call
+            // IPaymentMonitorHealth.ReconcileAsync, and even then only ledgers still inside its configured
+            // ReconcileWindow are re-read. An outage that outlasts that window loses the valuation for good.
             _logger.LogError(
                 ex,
-                "queueing payment {Hash} for valuation failed; reconciliation will offer it again",
+                "queueing payment {Hash} for valuation failed; it is lost unless the host runs reconciliation, and only within its ReconcileWindow",
                 record.TransactionHash);
         }
     }
