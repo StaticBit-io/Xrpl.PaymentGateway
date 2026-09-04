@@ -94,6 +94,9 @@ h2 {
 
 .monitor-text { flex: 1; }
 
+/* Between the monitor's own state and the quotes pipeline's, when both are visible in the one strip. */
+.monitor-sep { flex: none; }
+
 .card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -192,6 +195,11 @@ code.tag {
 }
 
 code.uri { font-size: .78rem; }
+
+/* The attribute means hidden, whatever else an element's own rule says. Without this, any element whose
+   class sets `display` — `.waiting` is the one that bit — stays on screen after the page sets `hidden`,
+   because the user-agent rule for [hidden] loses to a class selector on specificity. */
+[hidden] { display: none !important; }
 
 .hint {
     margin: .5rem 0 0;
@@ -313,4 +321,148 @@ code.inline {
     display: inline;
     padding: .1rem .3rem;
     font-size: .8rem;
+}
+
+/* The checkout price panel: what the buyer is being asked for, before any payment exists. */
+.price {
+    margin: 0;
+    font-size: 1.3rem;
+    font-weight: 700;
+}
+
+/* One line per pair that can price this checkout. The list only ever holds a handful of entries, so it
+   reads as a short menu of ways to pay rather than as a table. */
+.prices {
+    list-style: none;
+    margin: .5rem 0 0;
+    padding: 0;
+}
+
+.prices li {
+    display: flex;
+    align-items: baseline;
+    gap: .6rem;
+    flex-wrap: wrap;
+    padding: .3rem 0;
+}
+
+.prices .hint { margin: 0; }
+
+.price-amount {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+/* The demo wallet's buttons: one row per asset, each an amount and a send. */
+.demo-assets {
+    list-style: none;
+    margin: .6rem 0 0;
+    padding: 0;
+}
+
+.demo-asset {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    flex-wrap: wrap;
+    margin-top: .5rem;
+}
+
+/* The bare `code` rule below stretches to fill a row; an asset label is a label, so it takes only the
+   width its code needs. */
+.demo-asset-code {
+    flex: 0 0 auto;
+    min-width: 3.5rem;
+    text-align: center;
+    font-weight: 600;
+}
+
+.demo-asset input[type="number"] {
+    padding: .4rem .55rem;
+    font: inherit;
+    font-size: .85rem;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: .4rem;
+    width: 9rem;
+}
+
+.demo-asset-status {
+    font-size: .82rem;
+    color: var(--muted);
+}
+
+/* A valuation appended to a payment row after the fact — a second signal, visibly later than the row
+   itself rather than folded into it from the start. */
+.valuation {
+    margin: .55rem 0 0;
+    padding-top: .55rem;
+    border-top: 1px dashed var(--border);
+    font-size: .85rem;
+    color: var(--muted);
+}
+
+.valuation.valued { color: var(--ok); }
+.valuation.pending { color: var(--muted); }
+.valuation.failed,
+.valuation.stuck,
+.valuation.written-off { color: var(--warn); }
+
+.unresolved {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.unresolved li {
+    border: 1px solid var(--warn);
+    border-radius: .5rem;
+    padding: .9rem 1rem;
+    margin-top: .8rem;
+}
+
+.unresolved-amount {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--warn);
+}
+
+.unresolved-meta {
+    margin: .35rem 0 0;
+    font-size: .8rem;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+}
+
+.unresolved-actions {
+    display: flex;
+    gap: .5rem;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: .7rem;
+}
+
+.unresolved-actions input[type="text"],
+.unresolved-actions input[type="number"] {
+    padding: .4rem .55rem;
+    font: inherit;
+    font-size: .85rem;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: .4rem;
+    width: 9rem;
+}
+
+.unresolved-actions button.secondary {
+    background: transparent;
+    color: var(--text);
+    border-color: var(--border);
+}
+
+.unresolved-status {
+    margin-left: .3rem;
+    font-size: .8rem;
+    color: var(--muted);
 }

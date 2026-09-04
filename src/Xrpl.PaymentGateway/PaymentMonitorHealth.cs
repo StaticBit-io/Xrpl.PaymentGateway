@@ -23,6 +23,7 @@ internal sealed class PaymentMonitorHealth : IPaymentMonitorHealth
     private readonly IXrplNodeConnectionFactory _connectionFactory;
     private readonly ILogger<PaymentMonitorHealth> _logger;
     private readonly PaymentDispatcher _dispatcher;
+    private readonly ValuationEnqueuer? _valuationEnqueuer;
     private readonly TransactionProcessor _processor;
     private readonly CatchUpRunner _catchUp;
     private readonly SemaphoreSlim _reconcileGate = new SemaphoreSlim(1, 1);
@@ -34,7 +35,8 @@ internal sealed class PaymentMonitorHealth : IPaymentMonitorHealth
         MonitorSnapshot snapshot,
         IXrplNodeConnectionFactory connectionFactory,
         ILogger<PaymentMonitorHealth> logger,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        ValuationEnqueuer? valuationEnqueuer = null)
     {
         _options = options.Value;
         _store = store;
@@ -42,6 +44,7 @@ internal sealed class PaymentMonitorHealth : IPaymentMonitorHealth
         _connectionFactory = connectionFactory;
         _logger = logger;
         _dispatcher = new PaymentDispatcher(store, handler, logger);
+        _valuationEnqueuer = valuationEnqueuer;
         _processor = new TransactionProcessor(_options.Address, timeProvider, logger);
         _catchUp = new CatchUpRunner(logger);
     }
@@ -265,17 +268,26 @@ internal sealed class PaymentMonitorHealth : IPaymentMonitorHealth
         }
 
         bool isNew = await _dispatcher.RecordAsync(record, cancellationToken).ConfigureAwait(false);
-        if (!isNew)
+
+        if (isNew)
         {
-            return false;
+            _logger.LogError(
+                "reconciliation found payment {Hash} in ledger {Ledger} that the monitor never recorded; it has been recorded now",
+                record.TransactionHash,
+                record.LedgerIndex);
+
+            await _dispatcher.DeliverAsync(record, cancellationToken).ConfigureAwait(false);
         }
 
-        _logger.LogError(
-            "reconciliation found payment {Hash} in ledger {Ledger} that the monitor never recorded; it has been recorded now",
-            record.TransactionHash,
-            record.LedgerIndex);
+        if (_valuationEnqueuer is not null)
+        {
+            // Offered whether or not the payment was already stored. This is the sweep's whole point for
+            // valuation: a payment whose live enqueue was lost to a store outage gets a second chance here,
+            // and offering it costs the quote store one round trip it rejects as a duplicate — cheap next
+            // to the alternative of losing the valuation for good.
+            await _valuationEnqueuer.EnqueueAsync(record, cancellationToken).ConfigureAwait(false);
+        }
 
-        await _dispatcher.DeliverAsync(record, cancellationToken).ConfigureAwait(false);
-        return true;
+        return isNew;
     }
 }

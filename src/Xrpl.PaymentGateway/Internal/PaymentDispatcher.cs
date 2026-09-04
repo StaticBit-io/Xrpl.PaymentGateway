@@ -8,6 +8,15 @@ namespace Xrpl.PaymentGateway.Internal;
 /// <see cref="RecordAsync"/> throws on store failures so the caller can retry them.
 /// <see cref="DeliverAsync"/> never throws: a broken handler must not stop the ledger being followed.
 /// </summary>
+/// <remarks>
+/// Deliberately does not know about <c>ValuationEnqueuer</c>. Queueing a valuation belongs after the
+/// receipt handler has been given its chance, so callers enqueue it explicitly, after
+/// <see cref="DeliverAsync"/>, and only for a payment <see cref="RecordAsync"/> just accepted as new — a
+/// replay costs neither call. That placement fixes the ordering, not the cost: the caller's method is
+/// still the per-transaction sink the catch-up loop awaits, so a quote store that hangs still costs a
+/// newly recorded payment during catch-up either way — see the remarks on <c>XrplPaymentMonitor
+/// .ProcessTransactionAsync</c> for the full accounting.
+/// </remarks>
 internal sealed class PaymentDispatcher
 {
     private readonly IPaymentStore _store;

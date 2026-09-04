@@ -115,10 +115,29 @@ Deliberately out of scope, so that what is in scope can be relied on:
 - **MPT amounts.** See above: not recorded, but not lost quietly either.
 - **A scheduler.** `CheckAsync` and `ReconcileAsync` are called by whatever the host already runs.
 
+## Quotes and valuation
+
+Optionally, the gateway keeps a liquidity reading for each asset you accept, prices any
+size against it without touching the network, and records what each received payment was
+worth in an asset of your choosing.
+
+It does not compute prices itself — you supply an `IQuoteSource`, and the gateway owns the
+refresh rhythm, the age policy and delivery. Valuation runs behind the payment path and
+never on it: the payment is recorded and announced first, and its value arrives as a
+second signal through `IPaymentValuedHandler`.
+
+See the [quotes reference](https://github.com/StaticBit-io/Xrpl.PaymentGateway/blob/release/docs/quotes.md).
+
 ## What it expects of the receiving account
 
 Use a dedicated account that only receives. Specifically, it must not have `DefaultRipple` enabled and
 should not hold DEX offers or AMM positions.
+
+If the account is itself the issuer of a token it accepts, a payment in that token is a redemption, and
+the balance change the ledger reports for it names the sender as the issuer rather than the account. A
+quote pair configured for that asset never matches it, so the payment is recorded but never valued. This
+is a property of the protocol, not a defect here — issue tokens you accept from a separate account, not
+the one this library watches.
 
 If a payment addressed to you *also* debits the account, or credits two assets at once, the record is
 still written — it is a buyer's money and dropping it would lose a real payment — but it is logged as an
@@ -180,7 +199,9 @@ dotnet run --project tests/Xrpl.PaymentGateway.Tests -- -trait "Category=Integra
 docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml down
 ```
 
-The stand publishes the same ports as the XrplCSharp CI stand, so only one of the two can run at a time.
+By default the stand publishes the same ports as the XrplCSharp CI stand, so only one of the two can run;
+[CONTRIBUTING.md](https://github.com/StaticBit-io/Xrpl.PaymentGateway/blob/release/CONTRIBUTING.md) shows how
+to move this one's ports so both can.
 If a healthy standalone node is already listening there, the tests use it and you can skip the compose step
 entirely; when nothing is listening, they skip themselves rather than fail.
 
@@ -217,10 +238,142 @@ already exists and is funded. For anything else, point it at your own receiving 
 |---|---|
 | `POST /api/checkout/{buyerId}` | Address, destination tag, and an X-address carrying both |
 | `GET /api/checkout/{buyerId}/qr.svg` | The X-address as a scannable QR code |
+| `GET /api/checkout/{buyerId}/price` | What this checkout is priced at, in the quote asset, and how old that reading is. Empty until a quote pair is configured |
 | `GET /api/checkout/{buyerId}/payments` | What this buyer has paid. The page polls this |
+| `GET /api/checkout/{buyerId}/valuations` | What this buyer's payments turned out to be worth, a second and later signal than the payment itself |
 | `GET /api/payments` | Everything the handler has been given |
+| `GET /api/valuations` | Every valuation the handler has been given, whichever state it landed in |
 | `GET /api/recorded` | Everything the store holds, when the store offers a snapshot |
 | `GET /api/health` | The monitor's state; 503 when it is not streaming |
 | `POST /api/reconcile` | Redeliver and re-verify on demand |
+| `GET /api/quotes/health` | Pair freshness, refresh failures, pending valuations and the age of the oldest of them. 404 when no quote pairs are configured; 503 when configured but not healthy |
+| `GET /api/quotes/unresolved` | Payments the automatic pipeline has not resolved, for an operator to act on |
+| `POST /api/quotes/unresolved/{transactionHash}/settle` | Price one unresolved payment by hand, at a rate supplied in the body |
+| `POST /api/quotes/unresolved/{transactionHash}/write-off` | Close one unresolved payment with no quote amount, recording why |
+| `GET /api/demo` | The demo wallet's address and the assets it may be asked to send. 404 when no demo seed is configured |
+| `POST /api/checkout/{buyerId}/pay` | Pay this checkout from the demo wallet. 404 when no demo seed is configured |
 
 Set `Xrpl:StorePath` to keep payments in a file instead of memory, and they survive a restart.
+
+### Quotes and valuation in the sample
+
+The demo shop takes payment in three things, all valued in USD: XRP and one issued token (`GEM` below, a
+placeholder), each priced into USD through its own pair, and USD itself, accepted directly. Set
+`Xrpl:Quotes:QuoteCurrency`/`Xrpl:Quotes:QuoteIssuer` and `Xrpl:Quotes:Pairs` and the page grows a price at
+checkout, a valuation that appears on a payment row a few seconds after the payment itself, a quote health
+strip beside the monitor strip, and an "Unresolved payments" section for whatever the automatic pipeline
+could not price. Leave it empty, the shipped default, and the sample runs exactly as it does without the
+feature — `AddXrplPaymentQuotes` is never even called.
+
+```json
+"Xrpl": {
+  "Quotes": {
+    "QuoteCurrency": "USD",
+    "QuoteIssuer": "rUsdIssuerAddress",
+    "Pairs": [
+      { "Currency": "XRP", "Rate": 0.55 },
+      { "Currency": "GEM", "Issuer": "rGemIssuerAddress", "Rate": 1.10 }
+    ],
+    "RefusedCurrencies": []
+  }
+}
+```
+
+`Rate` is quote-asset units per unit of the received asset; every pair shares the one
+`QuoteCurrency`/`QuoteIssuer` above them, because the sample values everything a buyer can pay with in the
+one asset a real shop would price its catalog in. USD is the third accepted asset and deliberately has no
+entry in `Pairs`: `QuotePair` rejects quoting an asset against itself, so there is no USD/USD pair and
+cannot be one — a payment already in USD needs no conversion, and the library queues no valuation for it.
+The sample handles that itself rather than asking the library to: `SamplePaymentHandler` checks whether a
+payment's currency and issuer are the configured `QuoteCurrency`/`QuoteIssuer`, and the page shows such a
+payment at its own amount, labelled as needing no conversion, instead of a row waiting forever for a
+valuation that was never going to arrive.
+
+A currency code longer than three characters has no short form on the ledger. RLUSD is
+`524C555344000000000000000000000000000000`, and that hex is what goes in `Currency` — `CurrencyKey` rejects
+a five-character code outright — and what the node reports back on every payment in it. The page decodes
+such a code to its name for display, so the asset still reads as `RLUSD` on the price line, on its pay
+button and on the payment row, while everything on the wire stays the code the ledger actually uses.
+
+Where the prices come from is `Xrpl:Quotes:Source`, and the sample ships two answers to it.
+
+The default, with the key absent or set to anything else, is `FixedRateQuoteSource`: rates read straight
+from configuration, no network call at all. It shows the shape of the integration with nothing else
+running — no stand, no pools, no liquidity — and it prices nothing real. Size does not move its answer, and
+its `LedgerIndex` counts captures rather than naming a ledger. `Xrpl:Quotes:RefusedCurrencies` names
+currencies it throws for instead of pricing, which gives the unresolved queue and the settle and write-off
+buttons something to act on in a demo that otherwise always prices cleanly.
+
+`"Source": "amm"` switches to `AmmQuoteSource`, which reads the pair's AMM pool off a validated ledger and
+prices a size through the constant-product formula with the pool's own trading fee. Every number then comes
+from the ledger: the ask moves when the pool does, the ledger index is a real one, and the price for the
+size differs from the price per unit — the checkout line grows a "below spot" figure, which is slippage,
+and a valuation's `EffectivePrice` sits below its `MarginalPrice` for the same reason. An asset with no
+pool reads as having no liquidity, so it goes to the operator's queue like any other asset nothing can
+price it against.
+
+`AmmQuoteSource` is still a demonstration, not a quote engine: one pool, no order book, no routing through
+a third asset, no splitting a size across venues. A pair whose book is deeper than its pool is mispriced by
+it, and a pair with no pool reads as dry with an order book standing right there. A real host brings its
+own pricing, the same way it brings its own `IPaymentStore` — that is what `IQuoteSource` being an
+interface is for.
+
+### Paying from the page
+
+Set `Xrpl:Demo:PayerSeed` to the seed of a funded account on the same network and the "Send the payment"
+step grows a row per accepted asset — an amount, prefilled with what the checkout asks for, and a button
+that signs the payment and submits it. It is the shell snippet the page already prints, moved onto the
+page, so a full demonstration needs one terminal instead of two.
+
+```json
+"Xrpl": {
+  "Demo": {
+    "PayerSeed": "sXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+  }
+}
+```
+
+Leave it empty, the shipped default, and neither the endpoints nor the buttons exist — the page waits for
+money sent from somewhere else, exactly as before.
+
+**A seed in configuration is a private key in a text file.** Use it against a standalone stand or a test
+network and nothing else. The endpoint is narrow on purpose — it can only pay the address and destination
+tag the gateway itself just issued for the buyer being checked out, in an asset the sample is configured to
+accept, and the caller names neither — but that narrowness protects the *destination*, not the seed.
+
+To pay in an issued currency, the demo payer needs a trust line to its issuer and a balance on it, and the
+receiving account needs a trust line for the same currency, or the payment is rejected by the ledger before
+the gateway ever sees it. On a standalone stand that means creating an issuer, enabling `DefaultRipple` on
+it so its token can move between two holders, opening the trust lines, and funding the payer.
+
+### Reproducing the whole demo on a standalone stand
+
+The quote demo needs a token economy the ledger does not come with — an issuer whose tokens can move
+between two holders, a receiving account with a trust line for each token it accepts, and a payer holding
+a balance in each. `samples/seed-demo-stand.py` builds it and writes the configuration that goes with it:
+
+```bash
+docker compose -p xrplpg-ci -f .ci-config/docker-compose.ci.yml up -d
+python3 samples/seed-demo-stand.py --write samples/Xrpl.PaymentGateway.SampleApi/appsettings.Development.json
+ASPNETCORE_ENVIRONMENT=Development dotnet run --project samples/Xrpl.PaymentGateway.SampleApi
+```
+
+It also creates an AMM pool for each priced pair and writes `"Source": "amm"`, so the demo prices off the
+ledger rather than off fixed rates. That gives the page all five assets at once: XRP, `GEM` and `RLUSD` —
+the last under the long hex code — each priced into USD through its own pool, USD accepted directly, and
+`JNK`, which is issued with no pool at all, so nothing can price it and it lands in the operator's queue.
+The demo payer's buttons can send any of them.
+
+The pools are sized so their spot prices match the fixed rates the same configuration carries, which makes
+the two sources comparable: switch `Source` back and the asks move only by the pool's fee and the size's
+own slippage. Drop the line entirely and the stand's pools stop being read at all.
+
+Every account comes from a fixed passphrase, so a second run against a live stand does nothing and a run
+against a recreated stand reproduces the same addresses. `--rpc` and `--node` point it at a stand on
+other ports; `XRPLPG_RPC_URL` and `XRPLPG_NODE_URL` do the same from the environment. Without `--write` it
+prints the configuration instead.
+
+`appsettings.Development.json` is git-ignored, because what the script writes into it includes the demo
+payer's seed. Its shape is committed beside it as `appsettings.Development.example.json`, with the
+addresses replaced by placeholders. And it is read only when the environment is `Development` — hence the
+variable above, since `dotnet run` in a fresh clone has no `launchSettings.json` to set it.

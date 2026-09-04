@@ -68,13 +68,29 @@ public sealed class FilePaymentStore : IPaymentStore, IDisposable
                 throw new InvalidOperationException("the destination tag space is exhausted");
             }
 
+            uint previousNextTag = _state.NextTag;
             uint assigned = _state.NextTag;
             _state.NextTag = assigned + 1;
             _state.TagsByBuyer[buyerId] = assigned;
 
-            // Persisted before it is returned: a tag handed to a buyer and then forgotten in a crash would
-            // be issued again to somebody else, and the first buyer's payment would land on the wrong one.
-            await SaveAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                // Persisted before it is returned: a tag handed to a buyer and then forgotten in a crash
+                // would be issued again to somebody else, and the first buyer's payment would land on the
+                // wrong one.
+                await SaveAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // The write failed, so the file never agreed to this assignment. Leaving it in memory
+                // would hand this tag out again on the very next call — to a second buyer, sharing one
+                // buyer's tag between two people — while the caller who saw the exception has no reason to
+                // believe a tag was ever assigned.
+                _state.NextTag = previousNextTag;
+                _state.TagsByBuyer.Remove(buyerId);
+                throw;
+            }
+
             return assigned;
         }
         finally
@@ -116,8 +132,22 @@ public sealed class FilePaymentStore : IPaymentStore, IDisposable
                 return false;
             }
 
-            _state.Payments.Add(new StoredPayment { Record = record, Handled = false });
-            await SaveAsync(cancellationToken).ConfigureAwait(false);
+            StoredPayment added = new StoredPayment { Record = record, Handled = false };
+            _state.Payments.Add(added);
+
+            try
+            {
+                await SaveAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Otherwise the hash reads as stored in memory forever while the file never agreed, and a
+                // caller who retries on the exception is refused with "already recorded" for a payment the
+                // file has no trace of.
+                _state.Payments.Remove(added);
+                throw;
+            }
+
             return true;
         }
         finally
@@ -140,7 +170,19 @@ public sealed class FilePaymentStore : IPaymentStore, IDisposable
             }
 
             found.Handled = true;
-            await SaveAsync(cancellationToken).ConfigureAwait(false);
+
+            try
+            {
+                await SaveAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Otherwise the payment reads as handled in memory while the file still holds it
+                // unhandled: reconciliation would never see it as needing redelivery, yet a restart would
+                // find it unhandled again and redeliver it — the exact drift this store exists to avoid.
+                found.Handled = false;
+                throw;
+            }
         }
         finally
         {
@@ -185,8 +227,18 @@ public sealed class FilePaymentStore : IPaymentStore, IDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            uint? previous = _state.Cursor;
             _state.Cursor = ledgerIndex;
-            await SaveAsync(cancellationToken).ConfigureAwait(false);
+
+            try
+            {
+                await SaveAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                _state.Cursor = previous;
+                throw;
+            }
         }
         finally
         {

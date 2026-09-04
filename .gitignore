@@ -11,3 +11,7 @@ _ReSharper.*/
 
 # IDE-generated, with a random port that would contradict the documented one.
 **/Properties/launchSettings.json
+
+# Written by samples/seed-demo-stand.py and holds the demo payer's seed. The shape is committed
+# beside it as appsettings.Development.example.json.
+**/appsettings.Development.json

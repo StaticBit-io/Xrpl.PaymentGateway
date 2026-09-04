@@ -8,9 +8,18 @@
     <link rel="icon" href="data:," />
 </head>
 <body>
+    <!-- One strip for both health facts: the gateway monitor's own state, and — appended beside it,
+         separated visually rather than on a line of its own — the quotes pipeline's freshness. Hidden
+         until /api/quotes/health answers with something other than 404 — quotes are optional, and with no
+         pairs configured that half has nothing honest to say. When the API cannot be reached at all, both
+         halves would only repeat the same "not answering" fact under two ids, so app.js hides this half
+         rather than showing it twice. -->
     <header class="monitor" id="monitor" aria-live="polite">
         <span class="monitor-dot" id="monitor-dot"></span>
         <span class="monitor-text" id="monitor-text">checking the monitor&hellip;</span>
+        <span class="monitor-sep" id="quote-monitor-sep" hidden>&middot;</span>
+        <span class="monitor-dot" id="quote-monitor-dot" hidden></span>
+        <span class="monitor-text" id="quote-monitor-text" hidden>checking quote health&hellip;</span>
         <button type="button" id="reconcile" class="link" title="Redeliver anything the handler never accepted and re-verify recent ledgers">
             run reconciliation
         </button>
@@ -42,6 +51,15 @@
 
         <section class="card" id="step-pay" hidden>
             <h2>2. Send the payment</h2>
+
+            <!-- Hidden unless a pair prices this checkout's currency: the price at checkout, before any
+                 money has moved. ExactOutput — "this is what the item costs; here is what to send for it" —
+                 the half of the feature that happens before a payment exists at all. -->
+            <div class="field" id="pay-price-field" hidden>
+                <span class="field-label">Priced at checkout</span>
+                <p class="price" id="pay-price-total"></p>
+                <ul class="prices" id="pay-price-list"></ul>
+            </div>
 
             <div class="field">
                 <span class="field-label">Address</span>
@@ -86,6 +104,20 @@
                 </div>
             </div>
 
+            <!-- Only there when Xrpl:Demo:PayerSeed is configured: a wallet this sample holds the seed for,
+                 so the whole path can be driven from this page instead of from a second terminal. It is the
+                 shell snippet below, moved onto the page — no part of the library. -->
+            <div class="field" id="pay-demo-field" hidden>
+                <span class="field-label">Or pay from the demo wallet</span>
+                <p class="hint" id="pay-demo-payer"></p>
+                <ul class="demo-assets" id="demo-assets"></ul>
+                <p class="hint">
+                    Each button signs a payment from that wallet to the address and tag above. The page does
+                    not then know the payment happened &mdash; it hears about it from the gateway's monitor,
+                    a few seconds later, exactly like a payment sent from anywhere else.
+                </p>
+            </div>
+
             <details class="cli">
                 <summary>Sending from the standalone stand instead</summary>
                 <p class="hint">
@@ -104,6 +136,26 @@
                 <span id="waiting-text">Watching for a payment tagged <code id="waiting-tag"></code>&hellip;</span>
             </div>
             <ul class="payments" id="payments"></ul>
+            <p class="hint">
+                A payment's value is a second signal, computed after it arrives &mdash; watch a row above
+                gain a valuation line a few seconds after it appears, rather than showing up already priced.
+            </p>
+        </section>
+
+        <!-- Hidden until at least one quote pair is configured, and empty most of the time even then: an
+             entry only appears once it has sat unpriced past what an operator would call reasonable. -->
+        <section class="card" id="step-unresolved" hidden>
+            <h2>Unresolved payments</h2>
+            <p class="lede">
+                Payments the automatic pipeline could not price on its own &mdash; a pair with nothing to
+                quote it against, or one this demo's fixed-rate source is configured to refuse outright.
+                This is the operator path, <code class="inline">IUnresolvedValuationAdmin</code>: settle at a
+                rate found some other way, or write it off. Either one is delivered to
+                <code class="inline">IPaymentValuedHandler</code> exactly like an automatic valuation, so a
+                resolved entry here shows up above with the same valuation line a priced payment gets.
+            </p>
+            <ul class="unresolved" id="unresolved-list"></ul>
+            <p class="hint" id="unresolved-empty">nothing waiting on an operator right now</p>
         </section>
     </main>
 
@@ -111,6 +163,9 @@
         <a href="/api/health">/api/health</a>
         <a href="/api/payments">/api/payments</a>
         <a href="/api/recorded">/api/recorded</a>
+        <a href="/api/valuations">/api/valuations</a>
+        <a href="/api/quotes/health">/api/quotes/health</a>
+        <a href="/api/quotes/unresolved">/api/quotes/unresolved</a>
     </footer>
 
     <script src="app.js"></script>
