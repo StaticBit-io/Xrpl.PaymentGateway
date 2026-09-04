@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.0 — unreleased
+## 1.1.0 — 2026-09-03
 
 Quotes and payment valuation, entirely optional: a host that upgrades and changes
 nothing else gets no new background service and no new network traffic.
