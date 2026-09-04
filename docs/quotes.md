@@ -3,6 +3,10 @@
 Optional. The gateway can keep a liquidity reading for each asset you accept, price a
 given size against it, and record what each received payment was worth.
 
+For a running version of all of this — a checkout page that prices an item, values the
+payment that arrives, and hands what it could not price to an operator — see the
+[sample guide](sample.md).
+
 ## What the gateway does and does not do
 
 It does not compute prices. Order-book and AMM arithmetic is a subject of its own, and a
