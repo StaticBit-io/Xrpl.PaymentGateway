@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.2.0 — 2026-09-06
+
+Listings for an operator screen, entirely optional: a host that upgrades and changes
+nothing else gets no new behaviour, no new background service and no new query.
 
 - `IPaymentDirectory` lists what a store recorded, for a host drawing an operator screen: buyers with
   their destination tags, and payments with the buyer each one resolves to and whether the host handler
