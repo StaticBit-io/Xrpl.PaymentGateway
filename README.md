@@ -31,6 +31,38 @@ hash and return false rather than throw on a duplicate. Both are easy to state a
 the test suite has a `PaymentStoreContract` class that every shipped store derives from — including the
 concurrency and restart cases. Deriving from it is how a new store proves itself.
 
+## Listing what was recorded
+
+`IPaymentStore` answers point questions — this buyer's tag, this tag's buyer, what is still undelivered —
+because that is all the payment path needs. An operator screen needs listings, and those live on a
+separate interface, `IPaymentDirectory`:
+
+```csharp
+// The store you already registered. All three shipped stores implement it.
+IPaymentDirectory directory = (IPaymentDirectory)store;
+
+BuyerTagPage buyers = await directory.ListBuyersAsync(limit: 50, offset: 0, ct);
+
+RecordedPaymentPage recent = await directory.ListPaymentsAsync(PaymentAttribution.Any, 50, 0, ct);
+
+// Money that arrived and belongs to nobody: no destination tag, or a tag never issued.
+RecordedPaymentPage orphans = await directory.ListPaymentsAsync(PaymentAttribution.Unattributed, 50, 0, ct);
+```
+
+Separate rather than folded into `IPaymentStore` for the same reason `IQuoteStore` was kept separate in
+1.1.0: a store written against an earlier version keeps compiling. It is a capability, so a host that
+supplies its own store tests for the interface rather than assuming it.
+
+`PaymentAttribution.Unattributed` is the one worth knowing about. Such a payment is invisible everywhere
+else — no valuation queue holds it, no balance shows it, and the sender is known but is not necessarily
+the buyer. Without a listing, an operator learns about it from whoever sent it.
+
+Each row carries the buyer the tag was issued to (null when it belongs to nobody) and whether
+`MarkHandledAsync` has been called, so a stuck delivery is visible as an old unhandled payment. Buyers are
+ordered by tag, which is issue order and the only ordering paging can trust; payments are newest first,
+which offsets cannot promise stability under — fine for a screen, not a basis for anything that must see
+every row. A new store proves its directory by deriving from `PaymentDirectoryContract`.
+
 ## Use
 
 ```csharp

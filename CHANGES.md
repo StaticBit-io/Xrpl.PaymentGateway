@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- `IPaymentDirectory` lists what a store recorded, for a host drawing an operator screen: buyers with
+  their destination tags, and payments with the buyer each one resolves to and whether the host handler
+  has taken delivery. Separate from `IPaymentStore`, so a store written against 1.0.0 or 1.1.0 keeps
+  compiling; the three shipped stores implement it, and a new one proves it against
+  `PaymentDirectoryContract`.
+- `PaymentAttribution.Unattributed` lists the payments that belong to nobody — no destination tag, or a
+  tag this store never issued. Money in that state was invisible: it reaches no valuation queue and no
+  balance, and the sender is not necessarily the buyer, so an operator learned about it from whoever
+  sent it.
+
 ## 1.1.0 — 2026-09-03
 
 Quotes and payment valuation, entirely optional: a host that upgrades and changes

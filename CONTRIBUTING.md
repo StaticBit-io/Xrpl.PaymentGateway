@@ -88,6 +88,21 @@ public class MyStoreTests : PaymentStoreContract
 }
 ```
 
+A store may also implement `IPaymentDirectory` — the read-only listings an operator screen needs. It is
+optional: nothing in the gateway calls it, and a store without it works everywhere a store is used. If you
+do implement it, prove it the same way, by deriving from `PaymentDirectoryContract`:
+
+```csharp
+public class MyDirectoryTests : PaymentDirectoryContract
+{
+    protected override Task<(IPaymentStore Store, IPaymentDirectory Directory)> CreateAsync()
+    {
+        MyStore store = new MyStore();
+        return Task.FromResult<(IPaymentStore, IPaymentDirectory)>((store, store));
+    }
+}
+```
+
 ## Add a quote store
 
 `IQuoteStore` has one hard requirement: `TryEnqueueValuationAsync` must enforce uniqueness

@@ -13,7 +13,7 @@ namespace Xrpl.PaymentGateway.Postgres;
 /// value is consumed when two callers race for the same new buyer and one of them loses. Nothing depends
 /// on the numbering being dense, and a buyer's tag never changes once issued.
 /// </remarks>
-public sealed class PostgresPaymentStore : IPaymentStore
+public sealed class PostgresPaymentStore : IPaymentStore, IPaymentDirectory
 {
     private readonly string _connectionString;
     private readonly string _schema;
@@ -221,6 +221,123 @@ public sealed class PostgresPaymentStore : IPaymentStore
 
         return records;
     }
+
+    public async Task<BuyerTagPage> ListBuyersAsync(int limit, int offset, CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+
+        await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+
+        List<BuyerTag> items = new List<BuyerTag>();
+        await using (NpgsqlCommand command = new NpgsqlCommand(
+            $"""
+            SELECT buyer_id, destination_tag
+            FROM "{_schema}".buyers
+            ORDER BY destination_tag
+            LIMIT @limit OFFSET @offset
+            """,
+            connection))
+        {
+            command.Parameters.AddWithValue("limit", limit);
+            command.Parameters.AddWithValue("offset", offset);
+
+            await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                items.Add(new BuyerTag(reader.GetString(0), (uint)reader.GetInt64(1)));
+            }
+        }
+
+        // A second statement on the same connection rather than a window function beside the rows: the
+        // count is wanted even when the page is empty, which is exactly the case a per-row count cannot
+        // answer -- an operator on the last page would be told there are none at all.
+        await using NpgsqlCommand count = new NpgsqlCommand(
+            $"""SELECT COUNT(*) FROM "{_schema}".buyers""", connection);
+        int total = Convert.ToInt32(await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
+
+        return new BuyerTagPage { Items = items, TotalCount = total };
+    }
+
+    public async Task<RecordedPaymentPage> ListPaymentsAsync(
+        PaymentAttribution attribution, int limit, int offset, CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+
+        string filter = AttributionFilter(attribution);
+
+        await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+
+        List<RecordedPayment> items = new List<RecordedPayment>();
+        await using (NpgsqlCommand command = new NpgsqlCommand(
+            $"""
+            SELECT p.transaction_hash, p.transaction_type, p.sender, p.destination_tag, p.currency,
+                   p.issuer, p.value, p.ledger_index, p.processed_at, p.handled, b.buyer_id
+            FROM "{_schema}".payments p
+            LEFT JOIN "{_schema}".buyers b ON b.destination_tag = p.destination_tag
+            WHERE {filter}
+            ORDER BY p.recorded_seq DESC
+            LIMIT @limit OFFSET @offset
+            """,
+            connection))
+        {
+            command.Parameters.AddWithValue("limit", limit);
+            command.Parameters.AddWithValue("offset", offset);
+
+            await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                items.Add(new RecordedPayment
+                {
+                    Payment = new PaymentRecord
+                    {
+                        TransactionHash = reader.GetString(0),
+                        TransactionType = reader.GetString(1),
+                        Sender = reader.GetString(2),
+                        DestinationTag = reader.IsDBNull(3) ? null : (uint)reader.GetInt64(3),
+                        Currency = reader.GetString(4),
+                        Issuer = reader.IsDBNull(5) ? null : reader.GetString(5),
+                        Value = reader.GetDecimal(6),
+                        LedgerIndex = (uint)reader.GetInt64(7),
+                        ProcessedAt = reader.GetFieldValue<DateTimeOffset>(8),
+                    },
+                    Handled = reader.GetBoolean(9),
+                    BuyerId = reader.IsDBNull(10) ? null : reader.GetString(10),
+                });
+            }
+        }
+
+        await using NpgsqlCommand count = new NpgsqlCommand(
+            $"""
+            SELECT COUNT(*)
+            FROM "{_schema}".payments p
+            LEFT JOIN "{_schema}".buyers b ON b.destination_tag = p.destination_tag
+            WHERE {filter}
+            """,
+            connection);
+        int total = Convert.ToInt32(await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
+
+        return new RecordedPaymentPage { Items = items, TotalCount = total };
+    }
+
+    /// <summary>A SQL predicate over the joined payment and buyer rows for one <see cref="PaymentAttribution"/>.</summary>
+    /// <remarks>
+    /// Interpolated directly rather than parameterized, the same way <c>PostgresQuoteStore</c> builds its
+    /// state filters: the value always comes from this enum, never from a caller, so there is nothing here
+    /// for a parameter to protect against. An unknown value throws instead of quietly matching everything --
+    /// a filter that silently widens is how an "unattributed only" screen ends up showing every payment.
+    ///
+    /// "Belongs to nobody" is the JOIN missing, not the tag being null: a tag this store never issued is
+    /// just as untraceable as no tag at all, and the LEFT JOIN already tells the two apart from a hit.
+    /// </remarks>
+    private static string AttributionFilter(PaymentAttribution attribution) => attribution switch
+    {
+        PaymentAttribution.Any => "TRUE",
+        PaymentAttribution.Attributed => "b.buyer_id IS NOT NULL",
+        PaymentAttribution.Unattributed => "b.buyer_id IS NULL",
+        _ => throw new ArgumentOutOfRangeException(nameof(attribution), attribution, "unknown attribution filter"),
+    };
 
     public async Task<uint?> GetLastProcessedLedgerAsync(CancellationToken cancellationToken)
     {

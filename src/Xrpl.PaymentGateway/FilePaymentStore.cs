@@ -21,7 +21,7 @@ namespace Xrpl.PaymentGateway;
 /// which is the right trade at the volume a single receiving account sees and the wrong one at scale.
 /// </para>
 /// </remarks>
-public sealed class FilePaymentStore : IPaymentStore, IDisposable
+public sealed class FilePaymentStore : IPaymentStore, IPaymentDirectory, IDisposable
 {
     private static readonly JsonSerializerOptions SerializerOptions = new JsonSerializerOptions
     {
@@ -208,6 +208,81 @@ public sealed class FilePaymentStore : IPaymentStore, IDisposable
             _gate.Release();
         }
     }
+
+    public async Task<BuyerTagPage> ListBuyersAsync(int limit, int offset, CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            List<BuyerTag> page = _state.TagsByBuyer
+                .OrderBy(pair => pair.Value)
+                .Skip(offset)
+                .Take(limit)
+                .Select(pair => new BuyerTag(pair.Key, pair.Value))
+                .ToList();
+
+            return new BuyerTagPage { Items = page, TotalCount = _state.TagsByBuyer.Count };
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<RecordedPaymentPage> ListPaymentsAsync(
+        PaymentAttribution attribution, int limit, int offset, CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            // The file keeps payments in the order they were recorded, so the newest are at the end.
+            Dictionary<uint, string> buyersByTag = _state.TagsByBuyer
+                .ToDictionary(pair => pair.Value, pair => pair.Key);
+
+            List<StoredPayment> matching = Enumerable
+                .Reverse(_state.Payments)
+                .Where(stored => Matches(BuyerOf(stored.Record, buyersByTag), attribution))
+                .ToList();
+
+            List<RecordedPayment> page = matching
+                .Skip(offset)
+                .Take(limit)
+                .Select(stored => new RecordedPayment
+                {
+                    Payment = stored.Record,
+                    BuyerId = BuyerOf(stored.Record, buyersByTag),
+                    Handled = stored.Handled,
+                })
+                .ToList();
+
+            return new RecordedPaymentPage { Items = page, TotalCount = matching.Count };
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private static bool Matches(string? buyerId, PaymentAttribution attribution) => attribution switch
+    {
+        PaymentAttribution.Any => true,
+        PaymentAttribution.Attributed => buyerId is not null,
+        PaymentAttribution.Unattributed => buyerId is null,
+        _ => throw new ArgumentOutOfRangeException(nameof(attribution), attribution, "unknown attribution filter"),
+    };
+
+    /// <remarks>
+    /// Null for both shapes of "belongs to nobody" — no tag on the transaction, and a tag this store
+    /// never issued.
+    /// </remarks>
+    private static string? BuyerOf(PaymentRecord record, Dictionary<uint, string> buyersByTag) =>
+        record.DestinationTag is { } tag && buyersByTag.TryGetValue(tag, out string? buyer) ? buyer : null;
 
     public async Task<uint?> GetLastProcessedLedgerAsync(CancellationToken cancellationToken)
     {
