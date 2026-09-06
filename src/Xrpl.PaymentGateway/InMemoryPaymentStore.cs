@@ -7,7 +7,7 @@ namespace Xrpl.PaymentGateway;
 /// contract and backs tests and samples. Everything is lost on restart, so a production host that must
 /// survive a restart supplies its own store.
 /// </summary>
-public sealed class InMemoryPaymentStore : IPaymentStore
+public sealed class InMemoryPaymentStore : IPaymentStore, IPaymentDirectory
 {
     private readonly object _gate = new object();
     private readonly Dictionary<string, uint> _tagsByBuyer = new Dictionary<string, uint>(StringComparer.Ordinal);
@@ -124,6 +124,79 @@ public sealed class InMemoryPaymentStore : IPaymentStore
             return Task.FromResult<IReadOnlyList<PaymentRecord>>(result);
         }
     }
+
+    public Task<BuyerTagPage> ListBuyersAsync(int limit, int offset, CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+
+        lock (_gate)
+        {
+            List<BuyerTag> page = _tagsByBuyer
+                .OrderBy(pair => pair.Value)
+                .Skip(offset)
+                .Take(limit)
+                .Select(pair => new BuyerTag(pair.Key, pair.Value))
+                .ToList();
+
+            return Task.FromResult(new BuyerTagPage { Items = page, TotalCount = _tagsByBuyer.Count });
+        }
+    }
+
+    public Task<RecordedPaymentPage> ListPaymentsAsync(
+        PaymentAttribution attribution, int limit, int offset, CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+
+        lock (_gate)
+        {
+            // Reversed rather than sorted: insertion order is recording order, and the newest is the end.
+            IEnumerable<PaymentEntry> matching = Enumerable
+                .Reverse(_insertionOrder)
+                .Select(hash => _payments[hash])
+                .Where(entry => Matches(entry.Record, attribution));
+
+            List<RecordedPayment> page = new List<RecordedPayment>();
+            int total = 0;
+            foreach (PaymentEntry entry in matching)
+            {
+                // Counted before paging, because TotalCount is what a screen paginates against and the
+                // page it is on says nothing about how many rows there are.
+                total++;
+                if (total > offset && page.Count < limit)
+                {
+                    page.Add(Describe(entry));
+                }
+            }
+
+            return Task.FromResult(new RecordedPaymentPage { Items = page, TotalCount = total });
+        }
+    }
+
+    /// <remarks>Caller holds <see cref="_gate"/>: this reads the tag index.</remarks>
+    private bool Matches(PaymentRecord record, PaymentAttribution attribution) => attribution switch
+    {
+        PaymentAttribution.Any => true,
+        PaymentAttribution.Attributed => BuyerOf(record) is not null,
+        PaymentAttribution.Unattributed => BuyerOf(record) is null,
+        _ => throw new ArgumentOutOfRangeException(nameof(attribution), attribution, "unknown attribution filter"),
+    };
+
+    /// <remarks>Caller holds <see cref="_gate"/>.</remarks>
+    private RecordedPayment Describe(PaymentEntry entry) => new RecordedPayment
+    {
+        Payment = entry.Record,
+        BuyerId = BuyerOf(entry.Record),
+        Handled = entry.Handled,
+    };
+
+    /// <remarks>
+    /// Caller holds <see cref="_gate"/>. Null for both shapes of "belongs to nobody" — no tag on the
+    /// transaction, and a tag this store never issued.
+    /// </remarks>
+    private string? BuyerOf(PaymentRecord record) =>
+        record.DestinationTag is { } tag && _buyersByTag.TryGetValue(tag, out string? buyer) ? buyer : null;
 
     public Task<uint?> GetLastProcessedLedgerAsync(CancellationToken cancellationToken)
     {
